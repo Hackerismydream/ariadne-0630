@@ -230,7 +230,6 @@ def _result_to_dict(result: ExecutionResult) -> dict:
         "stderr": result.stderr,
         "diff": result.diff,
         "changed_files": result.changed_files,
-        "test_result": result.test_result,
         "duration_seconds": result.duration_seconds,
         "command": result.command,
     }

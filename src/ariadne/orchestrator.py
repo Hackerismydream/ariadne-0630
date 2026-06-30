@@ -14,7 +14,7 @@ import logging
 from typing import Callable
 
 from ariadne.briefing import generate_briefing
-from ariadne.models import DelegationDecision, Issue, IssueStatus, SquadBriefing, Task, TaskStatus
+from ariadne.models import DelegationDecision, FailureReason, Issue, IssueStatus, SquadBriefing, Task, TaskStatus
 from ariadne.store import Store
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ class Orchestrator:
         squad = self.store.get_squad(task.squad_id)
         if squad is None:
             logger.error("squad %s not found for task %s", task.squad_id, task.id)
-            self.store.fail_task(task.id, "squad not found", __import__("ariadne.models", fromlist=["FailureReason"]).FailureReason.AGENT_ERROR)
+            self.store.fail_task(task.id, "squad not found", FailureReason.AGENT_ERROR)
             return
 
         # Leader must be the squad's leader agent
@@ -87,7 +87,7 @@ class Orchestrator:
         issue = self.store.get_issue(task.issue_id)
         if issue is None:
             logger.error("issue %s not found for task %s", task.issue_id, task.id)
-            self.store.fail_task(task.id, "issue not found", __import__("ariadne.models", fromlist=["FailureReason"]).FailureReason.AGENT_ERROR)
+            self.store.fail_task(task.id, "issue not found", FailureReason.AGENT_ERROR)
             return
 
         decision = self.llm_decide(briefing, issue)
@@ -103,7 +103,7 @@ class Orchestrator:
                 logger.error("delegation validation failed: %s", error)
                 if task.status == TaskStatus.CLAIMED:
                     self.store.start_task(task.id)
-                self.store.fail_task(task.id, error, __import__("ariadne.models", fromlist=["FailureReason"]).FailureReason.AGENT_ERROR)
+                self.store.fail_task(task.id, error, FailureReason.AGENT_ERROR)
                 return
 
             # Create child task for the member

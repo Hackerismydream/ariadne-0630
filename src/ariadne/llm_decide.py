@@ -109,7 +109,7 @@ def make_llm_decide(
     """Return a callable (briefing, issue) -> DelegationDecision | None.
 
     If api_key is None, falls back to deterministic_decide.
-    On API error, returns None (graceful degradation).
+    On API error, falls back to deterministic_decide (graceful degradation).
     """
     # Resolve API key from arg or env
     key = api_key or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY")

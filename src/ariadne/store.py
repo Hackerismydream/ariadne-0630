@@ -145,7 +145,8 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
-        self._lock = __import__("threading").Lock()
+        import threading
+        self._lock = threading.Lock()
 
         # Migration: add handoff_prompt column if not present
         cols = [r[1] for r in self._conn.execute("PRAGMA table_info(task)").fetchall()]
@@ -454,13 +455,14 @@ class Store:
             attempt=old.attempt + 1,
             max_attempts=old.max_attempts,
             parent_task_id=old.id,
+            handoff_prompt=old.handoff_prompt,
             created_at=datetime.now(timezone.utc),
         )
         self._conn.execute(
             """INSERT INTO task
                (id, issue_id, agent_id, squad_id, status, attempt, max_attempts,
-                parent_task_id, failure_reason, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                parent_task_id, failure_reason, handoff_prompt, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 new_task.id,
                 new_task.issue_id,
@@ -471,6 +473,7 @@ class Store:
                 new_task.max_attempts,
                 new_task.parent_task_id,
                 None,
+                new_task.handoff_prompt,
                 new_task.created_at.isoformat(),
             ),
         )

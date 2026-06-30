@@ -209,7 +209,6 @@ class ExecutionResult(BaseModel):
     stderr: str
     diff: str | None = None
     changed_files: list[str]
-    test_result: str | None = None
     failure_reason: FailureReason | None = None
     duration_seconds: float
     command: str

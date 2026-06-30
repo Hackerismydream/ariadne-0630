@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ruff_cache/
+.pytest_cache/
+
+# SQLite
+*.db
+
+# Benchmark output (regenerable)
+benchmark_report.json
+
+# OS
+.DS_Store

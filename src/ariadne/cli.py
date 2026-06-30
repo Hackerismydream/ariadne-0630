@@ -183,5 +183,35 @@ def daemon_status():
     store.close()
 
 
+# ---------------------------------------------------------------------------
+# Benchmark commands
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def benchmark_run(
+    iterations: int = typer.Option(5, "--iterations", "-n"),
+    backend: str = typer.Option("dry-run", "--backend", "-b"),
+):
+    """Run benchmark tasks and print report."""
+    import json
+
+    from ariadne.eval import BenchmarkTask, report_to_dict, run_benchmark
+
+    store = _get_store()
+    tasks = [
+        BenchmarkTask(
+            title=f"Benchmark task {i+1}",
+            description=f"Automated benchmark iteration {i+1} via {backend}",
+            backend=backend,
+            expected_success=True,
+        )
+        for i in range(iterations)
+    ]
+    report = run_benchmark(store, tasks)
+    typer.echo(json.dumps(report_to_dict(report), indent=2))
+    store.close()
+
+
 if __name__ == "__main__":
     app()

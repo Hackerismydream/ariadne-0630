@@ -1,6 +1,6 @@
 id: eval-001
 scope: eval
-status: pending
+status: done
 depends-on: [backend-002]
 ```
 

@@ -6,7 +6,7 @@ depends-on: [core-001]
 
 ## Objective
 
-Implement `src/multica_py/store.py`: SQLite persistence layer with atomic state
+Implement `src/ariadne/store.py`: SQLite persistence layer with atomic state
 transitions. This is the control plane — all task lifecycle operations go
 through this module.
 
@@ -19,7 +19,7 @@ through this module.
 ## Path
 
 ```
-src/multica_py/store.py
+src/ariadne/store.py
 tests/test_store.py
 tests/test_state_machine.py
 ```
@@ -30,7 +30,7 @@ tests/test_state_machine.py
 
 ```python
 class Store:
-    def __init__(self, db_path: str = "multica_py.db"): ...
+    def __init__(self, db_path: str = "ariadne.db"): ...
 
     # --- Issue ---
     def create_issue(self, title, description, assignee_type, assignee_id) -> Issue: ...
@@ -98,7 +98,7 @@ Per design doc `task-state-machine.md`. Create tables on `__init__` if not exist
 ## Verification
 
 ```bash
-ruff check src/multica_py/store.py
+ruff check src/ariadne/store.py
 pytest tests/test_store.py tests/test_state_machine.py -v
 ```
 

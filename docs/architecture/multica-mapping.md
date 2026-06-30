@@ -1,11 +1,11 @@
 # Multica Mapping
 
-> Each mechanism in multica-py → the multica source file it derives from.
+> Each mechanism in ariadne → the multica source file it derives from.
 > Read these multica source files to understand the original design before implementing.
 
 ## Mechanism 1: Task State Machine
 
-| multica-py | multica source | What we keep | What we change |
+| ariadne | multica source | What we keep | What we change |
 |------------|---------------|--------------|----------------|
 | `models.py` TaskStatus | `migration 001` CHECK constraint | 6 states (queued→claimed→running→completed/failed/cancelled) | Added `claimed` as explicit state (multica uses `dispatched`) |
 | `models.py` FailureReason | `migration 055` failure_reason column | 5 failure types | Same classification, Python enum instead of TEXT CHECK |
@@ -22,7 +22,7 @@
 
 ## Mechanism 2: Squad Briefing
 
-| multica-py | multica source | What we keep | What we change |
+| ariadne | multica source | What we keep | What we change |
 |------------|---------------|--------------|----------------|
 | `briefing.py` SquadBriefing | `squad_briefing.go:112` buildSquadLeaderBriefing | 3-section structure (protocol + roster + instructions) | Structured Pydantic model, not string concatenation |
 | `briefing.py` Operating Protocol | `squad_briefing.go:20` squadOperatingProtocol const | Core rule: "coordinate, NOT do the work yourself" | Adapted for structured delegation (no @mention syntax) |
@@ -40,7 +40,7 @@
 
 ## Mechanism 3: Daemon Claim Loop
 
-| multica-py | multica source | What we keep | What we change |
+| ariadne | multica source | What we keep | What we change |
 |------------|---------------|--------------|----------------|
 | `daemon.py` poll loop | `daemon.go` poll interval (3s default) | Periodic claim attempt | Same pattern, asyncio |
 | `daemon.py` heartbeat | `daemon.go` heartbeat (15s default) | Runtime liveness signal | SQLite timestamp, not server API call |

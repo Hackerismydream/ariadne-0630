@@ -4,7 +4,7 @@
 
 ## Project
 
-Multica-Py: local multi-agent orchestration platform. Turns coding agent harnesses
+Ariadne: local multi-agent orchestration platform. Turns coding agent harnesses
 (Codex, Claude Code) into pluggable executors orchestrated by a Squad mechanism
 (leader delegates, members execute, event loop re-evaluates).
 

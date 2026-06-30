@@ -6,7 +6,7 @@ depends-on: []
 
 ## Objective
 
-Create project scaffold + all Pydantic models and enums in `src/multica_py/models.py`.
+Create project scaffold + all Pydantic models and enums in `src/ariadne/models.py`.
 No SQLite, no logic — just the type definitions that all other modules depend on.
 
 ## Context
@@ -20,8 +20,8 @@ No SQLite, no logic — just the type definitions that all other modules depend 
 ## Path
 
 ```
-src/multica_py/__init__.py
-src/multica_py/models.py
+src/ariadne/__init__.py
+src/ariadne/models.py
 pyproject.toml
 tests/__init__.py
 tests/test_models.py
@@ -31,11 +31,11 @@ tests/test_models.py
 
 ### pyproject.toml
 
-- Package name: `multica-py`
+- Package name: `ariadne`
 - Python: >=3.11
 - Dependencies: pydantic >=2
 - Dev dependencies: pytest, ruff
-- CLI entry point: `multica-py = "multica_py.cli:app"` (cli.py not created yet, just declare)
+- CLI entry point: `ariadne = "ariadne.cli:app"` (cli.py not created yet, just declare)
 - src/ layout
 
 ### models.py — must define these types (all Pydantic BaseModel or Enum)
@@ -70,7 +70,7 @@ tests/test_models.py
 
 ```bash
 # Type check
-ruff check src/multica_py/models.py
+ruff check src/ariadne/models.py
 
 # Tests (must pass before merge):
 pytest tests/test_models.py -v

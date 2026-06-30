@@ -6,7 +6,7 @@ depends-on: [core-002]
 
 ## Objective
 
-Implement `src/multica_py/daemon.py`: the poll-claim-execute loop that turns
+Implement `src/ariadne/daemon.py`: the poll-claim-execute loop that turns
 the state machine into a running system. After this task, `cli daemon start`
 can poll for queued tasks, claim them, execute via dry-run backend, and
 report completion.
@@ -21,8 +21,8 @@ report completion.
 ## Path
 
 ```
-src/multica_py/daemon.py
-src/multica_py/cli.py          # minimal: issue create + daemon start + daemon status
+src/ariadne/daemon.py
+src/ariadne/cli.py          # minimal: issue create + daemon start + daemon status
 tests/test_daemon.py
 ```
 
@@ -98,12 +98,12 @@ SQLite). This is for stale detection — no external server to ping.
 ### CLI (minimal, in cli.py)
 
 ```
-multica-py issue create --title "..." --assignee-type agent --assignee-id <id>
-multica-py issue list
-multica-py daemon start [--max-iterations N] [--poll-interval 3]
-multica-py daemon status
-multica-py agent create --name "..." --backend codex
-multica-py agent list
+ariadne issue create --title "..." --assignee-type agent --assignee-id <id>
+ariadne issue list
+ariadne daemon start [--max-iterations N] [--poll-interval 3]
+ariadne daemon status
+ariadne agent create --name "..." --backend codex
+ariadne agent list
 ```
 
 daemon start uses DryRunBackend by default. Real backends come in Phase 3.
@@ -118,7 +118,7 @@ daemon start uses DryRunBackend by default. Real backends come in Phase 3.
 ## Verification
 
 ```bash
-ruff check src/multica_py/daemon.py src/multica_py/cli.py
+ruff check src/ariadne/daemon.py src/ariadne/cli.py
 pytest tests/test_daemon.py -v
 ```
 

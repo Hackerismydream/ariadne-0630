@@ -48,7 +48,7 @@ LLM-as-judge evaluation                   memory / backlog planning
 │                     Command template, safety gate, diff   │
 ├──────────────────────────────────────────────────────────┤
 │  Storage                                                   │
-│  SQLite (multica_py.db)                                   │
+│  SQLite (ariadne.db)                                   │
 │  Tables: issue, task, squad, squad_member, agent,         │
 │          activity_log, run_message                        │
 └──────────────────────────────────────────────────────────┘

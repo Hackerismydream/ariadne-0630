@@ -29,7 +29,7 @@ multica squad_briefing.go:
 ## Our Mechanism (what we change)
 
 ```
-multica-py orchestrator.py:
+ariadne orchestrator.py:
   1. issue assigned to squad → task enqueued for leader
   2. leader claims → briefing generated (same 3 sections, structured not markdown)
   3. leader outputs DelegationDecision (Pydantic model, not @mention)
@@ -42,7 +42,7 @@ multica-py orchestrator.py:
 
 ### Why structured delegation, not @mention
 
-| Aspect | multica @mention | multica-py DelegationDecision |
+| Aspect | multica @mention | ariadne DelegationDecision |
 |--------|-----------------|-------------------------------|
 | Format | `[@Name](mention://agent/<UUID>)` markdown | `DelegationDecision(target_agent, backend, reason)` |
 | Testability | Cannot unit-test markdown parsing reliably | Pydantic model, directly assertable |

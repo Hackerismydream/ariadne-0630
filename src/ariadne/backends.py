@@ -121,6 +121,18 @@ def _capture_diff(repo_path: str) -> tuple[str | None, list[str]]:
     return diff_text, changed_files
 
 
+def _is_git_repo(path: str) -> bool:
+    """Check if path is inside a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=path, capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def _blocked_result(
     context: ExecutionContext, backend_name: str, message: str, command: str = ""
 ) -> ExecutionResult:
@@ -200,6 +212,11 @@ class _ShellBackend:
     def is_available(self) -> bool:
         return shutil.which(self.executable_name) is not None
 
+    @staticmethod
+    def parse_output(stdout: str) -> tuple[str, dict | None]:
+        """Override in subclasses to parse structured output. Default: passthrough."""
+        return stdout, None
+
     def _command_template(self) -> str:
         return os.environ.get(self.template_env_var, self.default_template)
 
@@ -229,6 +246,24 @@ class _ShellBackend:
                 f"External execution blocked: `{self.executable_name}` command is unavailable.",
             )
 
+        # Worktree isolation: if target_repo is a git repo, create a worktree
+        exec_path = context.target_repo_path
+        worktree_path = None
+        if _is_git_repo(context.target_repo_path):
+            trace = context.trace_id or context.task_id
+            worktree_path = os.path.join(
+                context.target_repo_path, ".ariadne-worktrees", trace
+            )
+            try:
+                subprocess.run(
+                    ["git", "worktree", "add", worktree_path, "-b", f"ariadne/{trace}"],
+                    cwd=context.target_repo_path,
+                    capture_output=True, text=True, timeout=10,
+                )
+                exec_path = worktree_path
+            except Exception:
+                worktree_path = None
+
         # Write handoff to temp file
         handoff_file = tempfile.NamedTemporaryFile(
             mode="w", suffix=".md", delete=False, prefix=f"ariadne-handoff-{context.task_id}-"
@@ -243,76 +278,92 @@ class _ShellBackend:
             except ValueError as e:
                 return _blocked_result(context, self.name, f"command template error: {e}")
 
-            # Progress: starting
             if on_progress:
                 on_progress(ProgressUpdate(
                     task_id=context.task_id,
                     summary=f"starting {self.name} execution",
-                    step=1, total=2,
+                    step=1, total=0,
                     timestamp=datetime.now(timezone.utc),
                 ))
 
-            # Execute
+            # Execute with Popen for streaming
             try:
-                result = subprocess.run(
-                    command,
-                    cwd=context.target_repo_path,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=context.timeout_seconds,
+                proc = subprocess.Popen(
+                    command, cwd=exec_path, shell=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 )
-                exit_code = result.returncode
-                stdout = result.stdout
-                stderr = result.stderr
-            except subprocess.TimeoutExpired:
-                duration = time.monotonic() - started
-                return ExecutionResult(
-                    backend_name=self.name,
-                    success=False,
-                    exit_code=-1,
-                    stdout="",
-                    stderr=f"execution timed out after {context.timeout_seconds}s",
-                    diff=None,
-                    changed_files=[],
-                    failure_reason=FailureReason.TIMEOUT,
-                    duration_seconds=duration,
-                    command=command,
-                )
+                stdout_lines = []
+                try:
+                    for line in proc.stdout:
+                        stdout_lines.append(line)
+                        if on_progress:
+                            on_progress(ProgressUpdate(
+                                task_id=context.task_id,
+                                summary=line.strip()[:200],
+                                step=0, total=0,
+                                timestamp=datetime.now(timezone.utc),
+                            ))
+                    proc.wait(timeout=context.timeout_seconds)
+                    exit_code = proc.returncode
+                    stdout = "".join(stdout_lines)
+                    stderr = proc.stderr.read() if proc.stderr else ""
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    duration = time.monotonic() - started
+                    return ExecutionResult(
+                        backend_name=self.name, success=False, exit_code=-1,
+                        stdout="", stderr=f"execution timed out after {context.timeout_seconds}s",
+                        diff=None, changed_files=[],
+                        failure_reason=FailureReason.TIMEOUT,
+                        duration_seconds=duration, command=command,
+                    )
+            except OSError as e:
+                return _blocked_result(context, self.name, f"failed to spawn process: {e}")
 
             duration = time.monotonic() - started
 
-            # Capture diff
-            diff, changed_files = _capture_diff(context.target_repo_path)
+            # Parse structured output (ClaudeBackend overrides parse_output)
+            parsed_stdout, metadata = self.parse_output(stdout)
 
-            # Progress: finished
+            # Capture diff from execution path
+            diff, changed_files = _capture_diff(exec_path)
+
             if on_progress:
                 on_progress(ProgressUpdate(
                     task_id=context.task_id,
                     summary=f"execution finished (exit_code={exit_code})",
-                    step=2, total=2,
+                    step=0, total=0,
                     timestamp=datetime.now(timezone.utc),
                 ))
 
             success = exit_code == 0
             return ExecutionResult(
-                backend_name=self.name,
-                success=success,
-                exit_code=exit_code,
-                stdout=stdout,
-                stderr=stderr,
-                diff=diff,
-                changed_files=changed_files,
+                backend_name=self.name, success=success, exit_code=exit_code,
+                stdout=parsed_stdout, stderr=stderr,
+                diff=diff, changed_files=changed_files,
                 failure_reason=None if success else FailureReason.AGENT_ERROR,
-                duration_seconds=duration,
-                command=command,
+                duration_seconds=duration, command=command, metadata=metadata,
             )
         finally:
-            # Always cleanup handoff file, even on exception
             try:
                 os.unlink(handoff_file.name)
             except OSError:
                 pass
+            if worktree_path:
+                try:
+                    subprocess.run(
+                        ["git", "worktree", "remove", worktree_path, "--force"],
+                        cwd=context.target_repo_path,
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    trace = context.trace_id or context.task_id
+                    subprocess.run(
+                        ["git", "branch", "-D", f"ariadne/{trace}"],
+                        cwd=context.target_repo_path,
+                        capture_output=True, text=True, timeout=10,
+                    )
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -335,12 +386,29 @@ class CodexBackend(_ShellBackend):
 
 
 class ClaudeBackend(_ShellBackend):
-    """Claude Code CLI backend. Command: claude --print --output-format json < {handoff_file}"""
+    """Claude Code CLI backend. Parses --output-format json into structured fields."""
 
     name = "claude-code"
     template_env_var = "ARIADNE_CLAUDE_COMMAND_TEMPLATE"
     default_template = "claude --print --output-format json < {handoff_file}"
     executable_name = "claude"
+
+    @staticmethod
+    def parse_output(stdout: str) -> tuple[str, dict | None]:
+        """Parse Claude's JSON output. Returns (result_text, metadata_dict).
+
+        If stdout is valid JSON with a 'result' field, extract it.
+        Otherwise return (raw_stdout, None) — graceful fallback.
+        """
+        import json as _json
+        try:
+            data = _json.loads(stdout.strip())
+            if isinstance(data, dict) and "result" in data:
+                metadata = {k: v for k, v in data.items() if k != "result"}
+                return data["result"], metadata
+        except (_json.JSONDecodeError, ValueError):
+            pass
+        return stdout, None
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,8 @@ Per docs/plan/tasks/core-003.md.
 
 from __future__ import annotations
 
+import os
+
 import typer
 
 from ariadne.backends import get_backend
@@ -60,6 +62,37 @@ def issue_list():
             f"  {issue.id}  [{issue.status.value}]  {issue.title}  "
             f"→ {issue.assignee_type.value}:{issue.assignee_id}"
         )
+    store.close()
+
+
+@app.command()
+def task_create(
+    issue_id: str = typer.Argument(...),
+    handoff_prompt: str = typer.Option("", "--handoff", "-h", help="Handoff prompt for the agent"),
+):
+    """Enqueue a task for an issue's assignee."""
+    store = _get_store()
+    issue = store.get_issue(issue_id)
+    if issue is None:
+        typer.echo(f"Issue not found: {issue_id}", err=True)
+        raise typer.Exit(1)
+    task = store.enqueue_task(issue.id, issue.assignee_id, handoff_prompt=handoff_prompt or None)
+    typer.echo(f"Created task: {task.id} (status={task.status.value})")
+    store.close()
+
+
+@app.command()
+def task_list():
+    """List all tasks."""
+    store = _get_store()
+    rows = store._conn.execute(
+        "SELECT id, issue_id, agent_id, status, attempt FROM task ORDER BY created_at"
+    ).fetchall()
+    if not rows:
+        typer.echo("No tasks.")
+        return
+    for r in rows:
+        typer.echo(f"  {r['id']}  [{r['status']}]  issue={r['issue_id']}  attempt={r['attempt']}")
     store.close()
 
 
@@ -143,15 +176,22 @@ def squad_add_member(
 def daemon_start(
     max_iterations: int = typer.Option(None, "--max-iterations"),
     poll_interval: float = typer.Option(3.0, "--poll-interval"),
+    confirm_execution: bool = typer.Option(False, "--confirm-execution", help="Enable real backend execution"),
+    target_repo: str = typer.Option(".", "--target-repo", help="Target repo path for execution"),
 ):
     """Start the daemon poll loop."""
+    if confirm_execution:
+        os.environ["ARIADNE_ENABLE_EXTERNAL_EXECUTION"] = "1"
     store = _get_store()
     daemon = Daemon(
         store=store,
         backend_factory=get_backend,
         poll_interval=poll_interval,
+        target_repo_path=target_repo,
     )
     typer.echo(f"Starting daemon (runtime={daemon.runtime_id}, poll={poll_interval}s)")
+    if confirm_execution:
+        typer.echo("  ⚠️  real execution ENABLED")
     if max_iterations:
         typer.echo(f"  max_iterations={max_iterations}")
     daemon.start(max_iterations=max_iterations)

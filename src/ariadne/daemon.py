@@ -36,6 +36,7 @@ class Daemon:
         heartbeat_interval: float = 15.0,
         stale_claim_timeout: float = 60.0,
         orchestrator=None,
+        target_repo_path: str = ".",
     ):
         self.store = store
         self.backend_factory = backend_factory
@@ -44,6 +45,7 @@ class Daemon:
         self.heartbeat_interval = heartbeat_interval
         self.stale_claim_timeout = stale_claim_timeout
         self.orchestrator = orchestrator
+        self.target_repo_path = target_repo_path
         self._running = False
         self._last_heartbeat: datetime | None = None
 
@@ -137,8 +139,9 @@ class Daemon:
             agent_name=agent_name,
             agent_instructions=instructions,
             handoff_prompt=task.handoff_prompt or f"Execute task for issue {task.issue_id}",
-            target_repo_path=".",
+            target_repo_path=self.target_repo_path,
             skill_refs=[],
+            confirm_execution=True,
         )
 
         try:

@@ -1,6 +1,6 @@
 id: squad-001
 scope: squad
-status: pending
+status: done
 depends-on: [core-003]
 ```
 

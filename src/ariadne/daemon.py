@@ -35,6 +35,7 @@ class Daemon:
         poll_interval: float = 3.0,
         heartbeat_interval: float = 15.0,
         stale_claim_timeout: float = 60.0,
+        orchestrator=None,
     ):
         self.store = store
         self.backend_factory = backend_factory
@@ -42,6 +43,7 @@ class Daemon:
         self.poll_interval = poll_interval
         self.heartbeat_interval = heartbeat_interval
         self.stale_claim_timeout = stale_claim_timeout
+        self.orchestrator = orchestrator
         self._running = False
         self._last_heartbeat: datetime | None = None
 
@@ -84,7 +86,36 @@ class Daemon:
         return None
 
     def _execute_task(self, task: Task) -> None:
-        """Execute a claimed task: start → backend.execute → complete/fail."""
+        """Execute a claimed task.
+
+        Leader tasks (squad_id set + agent is squad leader) → orchestrator.
+        Member tasks → backend execution.
+        """
+        # Check if this is a leader task
+        if task.squad_id and self._is_leader_task(task):
+            self._execute_leader_task(task)
+            return
+
+        self._execute_member_task(task)
+
+    def _is_leader_task(self, task: Task) -> bool:
+        """True if this task's agent is the squad's leader."""
+        squad = self.store.get_squad(task.squad_id)
+        if squad is None:
+            return False
+        return task.agent_id == squad.leader_id
+
+    def _execute_leader_task(self, task: Task) -> None:
+        """Delegate to orchestrator for leader decision."""
+        if self.orchestrator is None:
+            logger.error("no orchestrator set — cannot handle leader task %s", task.id)
+            self.store.start_task(task.id)
+            self.store.fail_task(task.id, "no orchestrator configured", FailureReason.AGENT_ERROR)
+            return
+        self.orchestrator.handle_leader_task(task)
+
+    def _execute_member_task(self, task: Task) -> None:
+        """Execute a member task via backend."""
         agent = self.store.get_agent(task.agent_id)
         agent_name = agent.name if agent else "unknown"
         instructions = agent.instructions if agent else ""
@@ -115,10 +146,12 @@ class Daemon:
         except TimeoutError:
             self.store.fail_task(task.id, "execution timed out", FailureReason.TIMEOUT)
             self._maybe_retry(task)
+            self._trigger_event_loop(task)
             return
         except Exception as e:
             self.store.fail_task(task.id, str(e), FailureReason.AGENT_ERROR)
             self._maybe_retry(task)
+            self._trigger_event_loop(task)
             return
 
         if result.success:
@@ -128,6 +161,14 @@ class Daemon:
             reason = result.failure_reason or FailureReason.AGENT_ERROR
             self.store.fail_task(task.id, result.stderr or "execution failed", reason)
             self._maybe_retry(task)
+
+        # Trigger event loop after member task reaches terminal state
+        self._trigger_event_loop(task)
+
+    def _trigger_event_loop(self, task: Task) -> None:
+        """Notify orchestrator that a member task completed (if orchestrator is set)."""
+        if self.orchestrator and task.squad_id:
+            self.orchestrator.on_member_task_complete(task)
 
     def _maybe_retry(self, task: Task) -> None:
         """Retry if attempts remain."""

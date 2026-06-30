@@ -136,7 +136,7 @@ class Daemon:
             task_id=task.id,
             agent_name=agent_name,
             agent_instructions=instructions,
-            handoff_prompt=f"Execute task for issue {task.issue_id}",
+            handoff_prompt=task.handoff_prompt or f"Execute task for issue {task.issue_id}",
             target_repo_path=".",
             skill_refs=[],
         )

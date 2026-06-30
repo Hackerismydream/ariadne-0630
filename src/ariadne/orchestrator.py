@@ -111,6 +111,7 @@ class Orchestrator:
                 issue_id=issue.id,
                 agent_id=decision.target_agent_id,
                 squad_id=task.squad_id,
+                handoff_prompt=decision.handoff_prompt,
             )
             logger.info(
                 "leader delegated to agent %s via backend %s, child task %s",

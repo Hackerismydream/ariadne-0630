@@ -97,6 +97,7 @@ class Task(BaseModel):
     result: dict | None = None
     error: str | None = None
     runtime_id: str | None = None
+    handoff_prompt: str | None = None
     created_at: datetime
 
     @property

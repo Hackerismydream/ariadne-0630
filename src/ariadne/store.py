@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS task (
     result TEXT,
     error TEXT,
     runtime_id TEXT,
+    handoff_prompt TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -146,6 +147,12 @@ class Store:
         self._conn.commit()
         self._lock = __import__("threading").Lock()
 
+        # Migration: add handoff_prompt column if not present
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(task)").fetchall()]
+        if "handoff_prompt" not in cols:
+            self._conn.execute("ALTER TABLE task ADD COLUMN handoff_prompt TEXT")
+            self._conn.commit()
+
     def close(self) -> None:
         self._conn.close()
 
@@ -180,6 +187,7 @@ class Store:
             result=json.loads(result_raw) if result_raw else None,
             error=row["error"],
             runtime_id=row["runtime_id"],
+            handoff_prompt=row["handoff_prompt"] if "handoff_prompt" in row.keys() else None,
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
@@ -303,6 +311,7 @@ class Store:
         issue_id: str,
         agent_id: str,
         squad_id: str | None = None,
+        handoff_prompt: str | None = None,
     ) -> Task:
         task = Task(
             id=_new_id("task"),
@@ -310,13 +319,14 @@ class Store:
             agent_id=agent_id,
             squad_id=squad_id,
             status=TaskStatus.QUEUED,
+            handoff_prompt=handoff_prompt,
             created_at=datetime.now(timezone.utc),
         )
         self._conn.execute(
             """INSERT INTO task
                (id, issue_id, agent_id, squad_id, status, attempt, max_attempts,
-                parent_task_id, failure_reason, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                parent_task_id, failure_reason, handoff_prompt, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task.id,
                 task.issue_id,
@@ -327,6 +337,7 @@ class Store:
                 task.max_attempts,
                 task.parent_task_id,
                 None,
+                task.handoff_prompt,
                 task.created_at.isoformat(),
             ),
         )

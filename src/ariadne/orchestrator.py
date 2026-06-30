@@ -106,18 +106,24 @@ class Orchestrator:
                 self.store.fail_task(task.id, error, FailureReason.AGENT_ERROR)
                 return
 
-            # Create child task for the member
+            # Create child task for the member — inherit leader's trace_id
             child = self.store.enqueue_task(
                 issue_id=issue.id,
                 agent_id=decision.target_agent_id,
                 squad_id=task.squad_id,
                 handoff_prompt=decision.handoff_prompt,
+                trace_id=task.trace_id,
+            )
+            self.store.log_activity(
+                task.trace_id, child.id, "delegated",
+                {"to_agent": decision.target_agent_id, "backend": decision.backend},
             )
             logger.info(
-                "leader delegated to agent %s via backend %s, child task %s",
+                "leader delegated to agent %s via backend %s, child task %s (trace=%s)",
                 decision.target_agent_id,
                 decision.backend,
                 child.id,
+                task.trace_id,
             )
 
         # Mark leader task completed (task should already be running —

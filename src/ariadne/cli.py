@@ -96,6 +96,32 @@ def task_list():
     store.close()
 
 
+@app.command()
+def task_timeline(
+    task_id: str = typer.Argument(...),
+):
+    """Show timeline of events for a task's trace_id."""
+    store = _get_store()
+    task = store.get_task(task_id)
+    if task is None:
+        typer.echo(f"Task not found: {task_id}", err=True)
+        raise typer.Exit(1)
+    if not task.trace_id:
+        typer.echo("No trace_id for this task.")
+        store.close()
+        return
+    events = store.get_timeline(task.trace_id)
+    if not events:
+        typer.echo("No events recorded.")
+        store.close()
+        return
+    typer.echo(f"Timeline for trace {task.trace_id}:")
+    for e in events:
+        details_str = f"  {e['details']}" if e["details"] else ""
+        typer.echo(f"  {e['created_at']}  [{e['event']}]  task={e['task_id']}{details_str}")
+    store.close()
+
+
 # ---------------------------------------------------------------------------
 # Agent commands
 # ---------------------------------------------------------------------------

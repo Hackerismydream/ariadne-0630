@@ -111,6 +111,17 @@ CREATE TABLE IF NOT EXISTS task (
 CREATE INDEX IF NOT EXISTS idx_task_claim
     ON task(status, created_at) WHERE status = 'queued';
 
+CREATE TABLE IF NOT EXISTS activity_log (
+    id TEXT PRIMARY KEY,
+    trace_id TEXT NOT NULL,
+    task_id TEXT,
+    event TEXT NOT NULL,
+    details TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_trace ON activity_log(trace_id);
+
 CREATE TABLE IF NOT EXISTS agent (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -153,6 +164,9 @@ class Store:
         if "handoff_prompt" not in cols:
             self._conn.execute("ALTER TABLE task ADD COLUMN handoff_prompt TEXT")
             self._conn.commit()
+        if "trace_id" not in cols:
+            self._conn.execute("ALTER TABLE task ADD COLUMN trace_id TEXT")
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -189,6 +203,7 @@ class Store:
             error=row["error"],
             runtime_id=row["runtime_id"],
             handoff_prompt=row["handoff_prompt"] if "handoff_prompt" in row.keys() else None,
+            trace_id=row["trace_id"] if "trace_id" in row.keys() else None,
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
@@ -313,6 +328,7 @@ class Store:
         agent_id: str,
         squad_id: str | None = None,
         handoff_prompt: str | None = None,
+        trace_id: str | None = None,
     ) -> Task:
         task = Task(
             id=_new_id("task"),
@@ -321,13 +337,14 @@ class Store:
             squad_id=squad_id,
             status=TaskStatus.QUEUED,
             handoff_prompt=handoff_prompt,
+            trace_id=trace_id or _new_id("trace"),
             created_at=datetime.now(timezone.utc),
         )
         self._conn.execute(
             """INSERT INTO task
                (id, issue_id, agent_id, squad_id, status, attempt, max_attempts,
-                parent_task_id, failure_reason, handoff_prompt, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                parent_task_id, failure_reason, handoff_prompt, trace_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task.id,
                 task.issue_id,
@@ -339,10 +356,12 @@ class Store:
                 task.parent_task_id,
                 None,
                 task.handoff_prompt,
+                task.trace_id,
                 task.created_at.isoformat(),
             ),
         )
         self._conn.commit()
+        self.log_activity(task.trace_id, task.id, "created", {"status": "queued"})
         return task
 
     def claim_task(self, agent_id: str, runtime_id: str) -> Task | None:
@@ -456,13 +475,14 @@ class Store:
             max_attempts=old.max_attempts,
             parent_task_id=old.id,
             handoff_prompt=old.handoff_prompt,
+            trace_id=old.trace_id,
             created_at=datetime.now(timezone.utc),
         )
         self._conn.execute(
             """INSERT INTO task
                (id, issue_id, agent_id, squad_id, status, attempt, max_attempts,
-                parent_task_id, failure_reason, handoff_prompt, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                parent_task_id, failure_reason, handoff_prompt, trace_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 new_task.id,
                 new_task.issue_id,
@@ -474,10 +494,12 @@ class Store:
                 new_task.parent_task_id,
                 None,
                 new_task.handoff_prompt,
+                new_task.trace_id,
                 new_task.created_at.isoformat(),
             ),
         )
         self._conn.commit()
+        self.log_activity(new_task.trace_id, new_task.id, "retried", {"attempt": new_task.attempt, "parent": old.id})
         return new_task
 
     def get_task(self, task_id: str) -> Task | None:
@@ -624,3 +646,47 @@ class Store:
         if agent is None:
             raise KeyError(f"leader agent not found: {squad.leader_id}")
         return agent
+
+    # ------------------------------------------------------------------
+    # Activity log / trace
+    # ------------------------------------------------------------------
+
+    def log_activity(
+        self,
+        trace_id: str,
+        task_id: str | None,
+        event: str,
+        details: dict | None = None,
+    ) -> None:
+        """Write an activity log entry for a trace."""
+        self._conn.execute(
+            """INSERT INTO activity_log (id, trace_id, task_id, event, details, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                _new_id("act"),
+                trace_id,
+                task_id,
+                event,
+                json.dumps(details) if details else None,
+                _now_iso(),
+            ),
+        )
+        self._conn.commit()
+
+    def get_timeline(self, trace_id: str) -> list[dict]:
+        """Return activity log entries for a trace, ordered by time."""
+        rows = self._conn.execute(
+            "SELECT * FROM activity_log WHERE trace_id = ? ORDER BY created_at",
+            (trace_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "trace_id": r["trace_id"],
+                "task_id": r["task_id"],
+                "event": r["event"],
+                "details": json.loads(r["details"]) if r["details"] else None,
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]

@@ -98,6 +98,7 @@ class Task(BaseModel):
     error: str | None = None
     runtime_id: str | None = None
     handoff_prompt: str | None = None
+    trace_id: str | None = None
     created_at: datetime
 
     @property
@@ -197,6 +198,7 @@ class ExecutionContext(BaseModel):
     confirm_execution: bool = False
     model: str | None = None
     effort: str | None = None
+    trace_id: str | None = None
 
 
 class ExecutionResult(BaseModel):
@@ -212,6 +214,7 @@ class ExecutionResult(BaseModel):
     failure_reason: FailureReason | None = None
     duration_seconds: float
     command: str
+    metadata: dict | None = None
 
 
 class ProgressUpdate(BaseModel):

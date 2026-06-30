@@ -123,6 +123,8 @@ class Daemon:
         instructions = agent.instructions if agent else ""
 
         self.store.start_task(task.id)  # claimed → running
+        if task.trace_id:
+            self.store.log_activity(task.trace_id, task.id, "started", {"backend": agent.backends[0] if agent and agent.backends else "dry-run"})
 
         backend_name = "dry-run"
         if agent and agent.backends:
@@ -142,6 +144,7 @@ class Daemon:
             target_repo_path=self.target_repo_path,
             skill_refs=[],
             confirm_execution=True,
+            trace_id=task.trace_id,
         )
 
         try:
@@ -159,10 +162,14 @@ class Daemon:
 
         if result.success:
             self.store.complete_task(task.id, _result_to_dict(result))
+            if task.trace_id:
+                self.store.log_activity(task.trace_id, task.id, "completed", {"backend": result.backend_name})
             logger.info("task %s completed", task.id)
         else:
             reason = result.failure_reason or FailureReason.AGENT_ERROR
             self.store.fail_task(task.id, result.stderr or "execution failed", reason)
+            if task.trace_id:
+                self.store.log_activity(task.trace_id, task.id, "failed", {"reason": reason.value, "error": result.stderr[:200] if result.stderr else ""})
             self._maybe_retry(task)
 
         # Trigger event loop after member task reaches terminal state

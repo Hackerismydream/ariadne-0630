@@ -351,5 +351,23 @@ def squad_run(
     conn.close()
 
 
+@app.command()
+def api_serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8766, "--port"),
+):
+    """Start the FastAPI dashboard server."""
+    try:
+        import uvicorn
+    except ImportError:
+        typer.echo("uvicorn not installed. Run: uv add uvicorn", err=True)
+        raise typer.Exit(1)
+
+    from ariadne.api import app as api_app
+
+    typer.echo(f"Starting dashboard at http://{host}:{port}")
+    uvicorn.run(api_app, host=host, port=port)
+
+
 if __name__ == "__main__":
     app()

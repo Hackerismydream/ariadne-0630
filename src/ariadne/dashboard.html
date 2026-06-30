@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ariadne Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: monospace; background: #0d1117; color: #c9d1d9; display: flex; flex-direction: column; height: 100vh; }
+  header { background: #161b22; padding: 12px 20px; border-bottom: 1px solid #30363d; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 16px; color: #58a6ff; }
+  button { background: #238636; color: #fff; border: none; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-family: monospace; }
+  button:hover { background: #2ea043; }
+  .main { display: flex; flex: 1; overflow: hidden; }
+  .left { width: 350px; border-right: 1px solid #30363d; overflow-y: auto; padding: 12px; }
+  .right { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 16px; }
+  .section { margin-bottom: 20px; }
+  .section h2 { font-size: 13px; color: #8b949e; margin-bottom: 8px; text-transform: uppercase; }
+  .item { background: #161b22; padding: 8px 12px; margin-bottom: 4px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; font-size: 12px; }
+  .item:hover { border-color: #58a6ff; }
+  .item.selected { border-color: #58a6ff; background: #1c2128; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: bold; }
+  .badge.queued { background: #1f6feb; color: #fff; }
+  .badge.claimed { background: #8957e5; color: #fff; }
+  .badge.running { background: #d29922; color: #000; }
+  .badge.completed { background: #238636; color: #fff; }
+  .badge.failed { background: #da3633; color: #fff; }
+  .badge.cancelled { background: #6e7681; color: #fff; }
+  .timeline-event { padding: 6px 12px; border-left: 2px solid #30363d; margin-bottom: 4px; font-size: 12px; }
+  .timeline-event .time { color: #8b949e; }
+  .timeline-event .event { color: #58a6ff; font-weight: bold; }
+  .empty { color: #6e7681; font-style: italic; padding: 12px; }
+  .roster-item { display: flex; justify-content: space-between; padding: 6px 12px; background: #161b22; border-radius: 6px; margin-bottom: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ariadne Dashboard</h1>
+  <button onclick="refresh()">Refresh</button>
+</header>
+<div class="main">
+  <div class="left">
+    <div class="section">
+      <h2>Issues</h2>
+      <div id="issues"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="section">
+      <h2>Tasks</h2>
+      <div id="tasks"><div class="empty">Loading...</div></div>
+    </div>
+  </div>
+  <div class="right">
+    <div class="section">
+      <h2>Task Timeline</h2>
+      <div id="timeline"><div class="empty">Select a task to see timeline.</div></div>
+    </div>
+    <div class="section">
+      <h2>Agent Roster</h2>
+      <div id="roster"><div class="empty">Loading...</div></div>
+    </div>
+  </div>
+</div>
+<script>
+let selectedTaskId = null;
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  return res.json();
+}
+
+async function refresh() {
+  try {
+    const [issues, tasks, agents] = await Promise.all([
+      fetchJSON('/api/issues'),
+      fetchJSON('/api/tasks'),
+      fetchJSON('/api/agents'),
+    ]);
+    renderIssues(issues);
+    renderTasks(tasks);
+    renderRoster(agents);
+  } catch (e) {
+    document.getElementById('issues').innerHTML = '<div class="empty">Failed to load. Is the API running?</div>';
+  }
+}
+
+function renderIssues(issues) {
+  const el = document.getElementById('issues');
+  if (!issues.length) { el.innerHTML = '<div class="empty">No issues. Create one via CLI.</div>'; return; }
+  el.innerHTML = issues.map(i =>
+    `<div class="item"><span class="badge ${i.status}">${i.status}</span> ${i.title}</div>`
+  ).join('');
+}
+
+function renderTasks(tasks) {
+  const el = document.getElementById('tasks');
+  if (!tasks.length) { el.innerHTML = '<div class="empty">No tasks.</div>'; return; }
+  el.innerHTML = tasks.map(t =>
+    `<div class="item ${t.id === selectedTaskId ? 'selected' : ''}" onclick="selectTask('${t.id}')">
+      <span class="badge ${t.status}">${t.status}</span> ${t.id.slice(0,12)}... attempt=${t.attempt}
+    </div>`
+  ).join('');
+}
+
+function renderRoster(agents) {
+  const el = document.getElementById('roster');
+  if (!agents.length) { el.innerHTML = '<div class="empty">No agents.</div>'; return; }
+  el.innerHTML = agents.map(a =>
+    `<div class="roster-item"><span>${a.name} (${a.backends.join(', ')})</span><span class="badge queued">idle</span></div>`
+  ).join('');
+}
+
+async function selectTask(taskId) {
+  selectedTaskId = taskId;
+  const el = document.getElementById('timeline');
+  el.innerHTML = '<div class="empty">Loading...</div>';
+  try {
+    const events = await fetchJSON(`/api/tasks/${taskId}/timeline`);
+    if (!events.length) { el.innerHTML = '<div class="empty">No events recorded.</div>'; return; }
+    el.innerHTML = events.map(e =>
+      `<div class="timeline-event"><span class="time">${e.created_at}</span> <span class="event">[${e.event}]</span> task=${e.task_id ? e.task_id.slice(0,12) : 'N/A'}</div>`
+    ).join('');
+  } catch (e) {
+    el.innerHTML = '<div class="empty">Failed to load timeline.</div>';
+  }
+  refresh();
+}
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

@@ -20,6 +20,10 @@ them in Python. Not a translation — an architecture extraction.
 | architecture | [task-state-machine.md](architecture/task-state-machine.md) | Task lifecycle, status transitions, failure classification |
 | architecture | [squad-orchestration.md](architecture/squad-orchestration.md) | Leader briefing, delegation, event loop |
 | architecture | [harness-backend.md](architecture/harness-backend.md) | ExecutionBackend protocol, Codex/Claude integration |
+| architecture | [trace-observability.md](architecture/trace-observability.md) | Trace ID, activity log, timeline |
+| architecture | [deep-execution.md](architecture/deep-execution.md) | Claude JSON parse, worktree isolation, streaming |
+| architecture | [real-squad.md](architecture/real-squad.md) | Real squad loop with LLM + Codex/Claude |
+| architecture | [dashboard-layout.md](architecture/dashboard-layout.md) | Web dashboard layout |
 | architecture | [multica-mapping.md](architecture/multica-mapping.md) | Each mechanism → multica source file it derives from |
 
 ## Delivery Plan

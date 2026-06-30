@@ -1,0 +1,92 @@
+{
+  "total_tasks": 10,
+  "success_count": 10,
+  "failure_count": 0,
+  "success_rate": 100.0,
+  "avg_score": 5.0,
+  "avg_duration_seconds": 0.0002,
+  "retry_count": 0,
+  "failure_reasons": {},
+  "tasks": [
+    {
+      "task_id": "task-1be962a3c493",
+      "title": "Benchmark task 1",
+      "success": true,
+      "duration_seconds": 0.000234,
+      "retry_count": 0,
+      "failure_reason": null
+    },
+    {
+      "task_id": "task-d10cf96ec984",
+      "title": "Benchmark task 2",
+      "success": true,
+      "duration_seconds": 0.000193,
+      "retry_count": 0,
+      "failure_reason": null
+    },
+    {
+      "task_id": "task-326f8c6a4ea3",
+      "title": "Benchmark task 3",
+      "success": true,
+      "duration_seconds": 0.00024,
+      "retry_count": 0,
+      "failure_reason": null
+    },
+    {
+      "task_id": "task-9ea46397c303",
+      "title": "Benchmark task 4",
+      "success": true,
+      "duration_seconds": 0.000216,
+      "retry_count": 0,
+      "failure_reason": null
+    },
+    {
+      "task_id": "task-b502f0374b90",
+      "title": "Benchmark task 5",
+      "success": true,
+      "duration_seconds": 0.000186,
+      "retry_count": 0,
+      "failure_reason": null
+    },
+    {
+      "task_id": "task-4e7607ff26f0",
+      "title": "Benchmark task 6",
+      "success": true,
+      "duration_seconds": 0.000186,
+      "retry_count": 0,
+      "failure_reason": null
+    },
+    {
+      "task_id": "task-f664dc52009d",
+      "title": "Benchmark task 7",
+      "success": true,
+      "duration_seconds": 0.000219,
+      "retry_count": 0,
+      "failure_reason": null
+    },
+    {
+      "task_id": "task-5d783023f9eb",
+      "title": "Benchmark task 8",
+      "success": true,
+      "duration_seconds": 0.000226,
+      "retry_count": 0,
+      "failure_reason": null
+    },
+    {
+      "task_id": "task-79bee2ebafd1",
+      "title": "Benchmark task 9",
+      "success": true,
+      "duration_seconds": 0.00025,
+      "retry_count": 0,
+      "failure_reason": null
+    },
+    {
+      "task_id": "task-a3cd2a8d8667",
+      "title": "Benchmark task 10",
+      "success": true,
+      "duration_seconds": 0.000216,
+      "retry_count": 0,
+      "failure_reason": null
+    }
+  ]
+}

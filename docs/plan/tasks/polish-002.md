@@ -1,6 +1,6 @@
 id: polish-002
 scope: polish
-status: pending
+status: done
 depends-on: [polish-001]
 ```
 

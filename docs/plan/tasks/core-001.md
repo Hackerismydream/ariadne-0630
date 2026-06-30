@@ -1,6 +1,6 @@
 id: core-001
 scope: core
-status: in-progress
+status: done
 depends-on: []
 ```
 

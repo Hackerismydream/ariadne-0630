@@ -174,7 +174,7 @@ def test_no_retry_when_exhausted(store):
     agent = store.create_agent("A", "", ["failing"], [])
     issue = store.create_issue("no retry", "", AssigneeType.AGENT, agent.id)
 
-    task1 = store.enqueue_task(issue.id, agent.id)
+    store.enqueue_task(issue.id, agent.id)
     d = Daemon(store=store, backend_factory=lambda n: FailBackend(), poll_interval=0.01)
     claimed1 = d._poll_once()
     d._execute_task(claimed1)
@@ -269,7 +269,7 @@ def test_cli_issue_create(cli_runner, tmp_path, monkeypatch):
 
     result = cli_runner.invoke(app, ["agent-list"])
     assert result.exit_code == 0
-    agent_line = [l for l in result.stdout.strip().split("\n") if "CLI Agent" in l][0]
+    agent_line = [line for line in result.stdout.strip().split("\n") if "CLI Agent" in line][0]
     agent_id = agent_line.strip().split()[0]
 
     result = cli_runner.invoke(app, [

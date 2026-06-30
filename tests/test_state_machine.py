@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from ariadne.models import AssigneeType, FailureReason, IssueStatus, TaskStatus
+from ariadne.models import AssigneeType, FailureReason, TaskStatus
 from ariadne.store import (
     InvalidStateTransition,
     MaxAttemptsExhausted,
@@ -177,7 +177,7 @@ def test_failure_classification(store, queued_task):
     ]
     for reason in reasons:
         issue = store.create_issue(f"test-{reason.value}", "", AssigneeType.AGENT, "agent-1")
-        task = store.enqueue_task(issue.id, "agent-1")
+        store.enqueue_task(issue.id, "agent-1")
         claimed = store.claim_task("agent-1", "rt-test")
         store.start_task(claimed.id)
         failed = store.fail_task(claimed.id, f"err-{reason.value}", reason)

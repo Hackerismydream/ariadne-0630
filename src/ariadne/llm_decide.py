@@ -20,8 +20,8 @@ from ariadne.orchestrator import deterministic_decide
 logger = logging.getLogger(__name__)
 
 
-def _build_prompt(briefing: SquadBriefing, issue: Issue) -> str:
-    """Build the LLM prompt from briefing + issue."""
+def _build_prompt(briefing: SquadBriefing, issue: Issue, completed_results: list[dict] | None = None) -> str:
+    """Build the LLM prompt from briefing + issue + completed member results."""
     roster_lines = []
     for entry in briefing.roster:
         skills = ", ".join(entry.skills) if entry.skills else "none"
@@ -35,6 +35,13 @@ def _build_prompt(briefing: SquadBriefing, issue: Issue) -> str:
         )
     roster_text = "\n".join(roster_lines) if roster_lines else "  (no members)"
 
+    results_section = ""
+    if completed_results:
+        results_lines = []
+        for r in completed_results:
+            results_lines.append(f"  - agent: {r.get('agent_name', '?')}, status: {r.get('status', '?')}, output: {str(r.get('result', ''))[:200]}")
+        results_section = "\n## Completed Member Results\n" + "\n".join(results_lines) + "\n"
+
     return f"""{briefing.protocol}
 
 ## Squad Roster
@@ -46,7 +53,7 @@ def _build_prompt(briefing: SquadBriefing, issue: Issue) -> str:
 ## Issue
 Title: {issue.title}
 Description: {issue.description}
-
+{results_section}
 ## Your Task
 Decide which member should handle this issue. Respond with JSON only, no markdown.
 
@@ -105,11 +112,11 @@ def make_llm_decide(
     api_key: str | None = None,
     model: str = "deepseek-chat",
     base_url: str = "https://api.deepseek.com/v1",
-) -> Callable[[SquadBriefing, Issue], DelegationDecision | None]:
-    """Return a callable (briefing, issue) -> DelegationDecision | None.
+) -> Callable[..., DelegationDecision | None]:
+    """Return a callable (briefing, issue, completed_results=None) -> DelegationDecision | None.
 
     If api_key is None, falls back to deterministic_decide.
-    On API error, falls back to deterministic_decide (graceful degradation).
+    On API error or 3 consecutive parse failures, falls back to deterministic_decide.
     """
     # Resolve API key from arg or env
     key = api_key or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -117,8 +124,15 @@ def make_llm_decide(
         logger.info("no LLM API key — using deterministic_decide fallback")
         return deterministic_decide
 
-    def decide(briefing: SquadBriefing, issue: Issue) -> DelegationDecision | None:
-        prompt = _build_prompt(briefing, issue)
+    failure_count = [0]
+
+    def decide(briefing: SquadBriefing, issue: Issue, completed_results: list[dict] | None = None) -> DelegationDecision | None:
+        prompt = _build_prompt(briefing, issue, completed_results)
+
+        # If 3 consecutive failures, fall back to deterministic
+        if failure_count[0] >= 3:
+            logger.warning("LLM failed %d times, falling back to deterministic", failure_count[0])
+            return deterministic_decide(briefing, issue)
 
         try:
             from openai import OpenAI
@@ -134,9 +148,19 @@ def make_llm_decide(
                 max_tokens=500,
             )
             text = response.choices[0].message.content or ""
-            return _parse_response(text, briefing)
+            result = _parse_response(text, briefing)
+            if result is None and "none" not in text.lower():
+                # Parse returned None but not explicitly "no delegation" — count as failure
+                failure_count[0] += 1
+                logger.warning("LLM parse failure #%d", failure_count[0])
+                if failure_count[0] >= 3:
+                    return deterministic_decide(briefing, issue)
+                return deterministic_decide(briefing, issue)
+            failure_count[0] = 0  # reset on success
+            return result
         except Exception as e:
-            logger.error("LLM API error, falling back to deterministic: %s", e)
+            failure_count[0] += 1
+            logger.error("LLM API error #%d, falling back: %s", failure_count[0], e)
             return deterministic_decide(briefing, issue)
 
     return decide

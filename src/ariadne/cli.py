@@ -279,5 +279,77 @@ def benchmark_run(
     store.close()
 
 
+# ---------------------------------------------------------------------------
+# Squad run command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def squad_run(
+    target_repo: str = typer.Option(..., "--target-repo", help="Target repo path"),
+    confirm_execution: bool = typer.Option(False, "--confirm-execution", help="Enable real backend execution"),
+    title: str = typer.Option("Multi-step feature implementation", "--title"),
+    description: str = typer.Option("Add a string_utils module with capitalize and reverse functions, plus tests", "--description"),
+    poll_interval: float = typer.Option(2.0, "--poll-interval"),
+    max_iterations: int = typer.Option(20, "--max-iterations"),
+):
+    """Create a squad with leader + 2 members and run the full orchestration loop."""
+    if confirm_execution:
+        os.environ["ARIADNE_ENABLE_EXTERNAL_EXECUTION"] = "1"
+
+    from ariadne.daemon import Daemon
+    from ariadne.llm_decide import make_llm_decide
+    from ariadne.orchestrator import Orchestrator
+
+    store = _get_store()
+
+    # Create agents
+    leader = store.create_agent("Leader", "Coordinate the squad", ["dry-run"], ["planning"])
+    coder = store.create_agent("Coder", "Write code", ["codex"], ["python"])
+    tester = store.create_agent("Tester", "Write tests", ["claude-code"], ["testing"])
+
+    # Create squad
+    squad = store.create_squad("Dev Squad", leader.id, instructions="Implement features step by step")
+    store.add_squad_member(squad.id, coder.id, role="coder")
+    store.add_squad_member(squad.id, tester.id, role="tester")
+
+    # Create issue + leader task
+    issue = store.create_issue(title, description, AssigneeType.SQUAD, squad.id)
+    store.enqueue_task(issue.id, leader.id, squad_id=squad.id)
+
+    typer.echo(f"Squad: {squad.id} (leader={leader.name}, members=[{coder.name}, {tester.name}])")
+    typer.echo(f"Issue: {issue.id} — {title}")
+    typer.echo(f"Target repo: {target_repo}")
+    if confirm_execution:
+        typer.echo("⚠️  real execution ENABLED")
+    typer.echo("Starting orchestration loop...")
+
+    # Wire orchestrator
+    decide_fn = make_llm_decide()
+    orc = Orchestrator(store=store, llm_decide=decide_fn)
+    daemon = Daemon(
+        store=store,
+        backend_factory=get_backend,
+        poll_interval=poll_interval,
+        orchestrator=orc,
+        target_repo_path=target_repo,
+    )
+    daemon.start(max_iterations=max_iterations)
+    store.close()
+
+    # Print timeline
+
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(_db_path)
+    conn.row_factory = _sqlite3.Row
+    trace = conn.execute("SELECT trace_id FROM task WHERE issue_id = ? LIMIT 1", (issue.id,)).fetchone()
+    if trace:
+        events = conn.execute("SELECT * FROM activity_log WHERE trace_id = ? ORDER BY created_at", (trace["trace_id"],)).fetchall()
+        typer.echo(f"\n=== Timeline (trace={trace['trace_id']}) ===")
+        for e in events:
+            typer.echo(f"  {e['created_at']}  [{e['event']}]  task={e['task_id']}")
+    conn.close()
+
+
 if __name__ == "__main__":
     app()

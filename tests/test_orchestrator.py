@@ -74,7 +74,7 @@ def test_leader_marks_done_when_no_delegation(store, squad_setup):
 
     store.claim_task(leader.id, "rt-1")
 
-    orc = Orchestrator(store=store, llm_decide=lambda b, i: None)
+    orc = Orchestrator(store=store, llm_decide=lambda b, i, cr=None: None)
     orc.handle_leader_task(leader_task)
 
     assert store.get_issue(issue.id).status == IssueStatus.DONE
@@ -95,7 +95,7 @@ def test_delegation_rejects_unknown_agent(store, squad_setup):
         skill_refs=[],
     )
 
-    orc = Orchestrator(store=store, llm_decide=lambda b, i: bad_decision)
+    orc = Orchestrator(store=store, llm_decide=lambda b, i, cr=None: bad_decision)
     orc.handle_leader_task(leader_task)
 
     assert store.get_task(leader_task.id).status == TaskStatus.FAILED

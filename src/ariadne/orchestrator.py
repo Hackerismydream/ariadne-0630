@@ -21,13 +21,19 @@ logger = logging.getLogger(__name__)
 
 
 def deterministic_decide(
-    briefing: SquadBriefing, issue: Issue
+    briefing: SquadBriefing, issue: Issue, completed_results: list[dict] | None = None
 ) -> DelegationDecision | None:
     """Simple delegation: pick the first member with a matching backend.
 
     This is the fallback when no LLM is available. It picks the first
-    roster entry and uses its first backend.
+    roster entry and uses its first backend. If completed_results show
+    members have already worked, returns None (marks done).
     """
+    if completed_results:
+        # If any member has completed, deterministic says "done"
+        if any(r["status"] == "completed" for r in completed_results):
+            return None
+
     if not briefing.roster:
         return None
 
@@ -90,7 +96,10 @@ class Orchestrator:
             self.store.fail_task(task.id, "issue not found", FailureReason.AGENT_ERROR)
             return
 
-        decision = self.llm_decide(briefing, issue)
+        # Gather completed member results for re-evaluation context
+        completed_results = self._gather_completed_results(task.squad_id, issue.id)
+
+        decision = self.llm_decide(briefing, issue, completed_results)
 
         if decision is None:
             # Leader decided no more work needed → mark issue done
@@ -166,6 +175,7 @@ class Orchestrator:
                 issue_id=task.issue_id,
                 agent_id=squad.leader_id,
                 squad_id=task.squad_id,
+                trace_id=task.trace_id,
             )
             logger.info(
                 "event loop: all members done, re-activated leader task %s for issue %s",
@@ -198,3 +208,25 @@ class Orchestrator:
             return f"unknown backend '{decision.backend}'"
 
         return None
+
+    def _gather_completed_results(self, squad_id: str, issue_id: str) -> list[dict]:
+        """Gather results of completed/failed member tasks for leader re-evaluation."""
+        rows = self.store._conn.execute(
+            """SELECT t.id, t.agent_id, t.status, t.result, t.error, a.name as agent_name
+               FROM task t LEFT JOIN agent a ON t.agent_id = a.id
+               WHERE t.squad_id = ? AND t.issue_id = ?
+                 AND t.status IN ('completed', 'failed')
+               ORDER BY t.created_at""",
+            (squad_id, issue_id),
+        ).fetchall()
+        import json as _json
+        results = []
+        for r in rows:
+            results.append({
+                "task_id": r["id"],
+                "agent_name": r["agent_name"] or "unknown",
+                "status": r["status"],
+                "result": _json.loads(r["result"]) if r["result"] else None,
+                "error": r["error"],
+            })
+        return results

@@ -79,7 +79,7 @@ def test_create_agent_and_list_agents(store: Store):
         backends=["codex"],
         skills=["python"],
     )
-    a2 = store.create_agent(
+    store.create_agent(
         name="Architect",
         instructions="design",
         backends=["claude-code"],
@@ -153,7 +153,7 @@ def test_enqueue_task_creates_queued_task(store: Store):
 def test_complete_task_sets_result_and_completed_at(store: Store):
     issue = store.create_issue("t", "", AssigneeType.AGENT, "agent-1")
     agent = store.create_agent("A", "", ["codex"], [])
-    task = store.enqueue_task(issue.id, agent.id)
+    store.enqueue_task(issue.id, agent.id)
     claimed = store.claim_task(agent.id, "runtime-1")
     assert claimed is not None
     store.start_task(claimed.id)

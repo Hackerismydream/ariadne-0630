@@ -48,7 +48,7 @@ def test_handoff_prompt_stored_on_task(store):
         reason="best coder",
         skill_refs=["python"],
     )
-    orc = Orchestrator(store=store, llm_decide=lambda b, i: decision)
+    orc = Orchestrator(store=store, llm_decide=lambda b, i, cr=None: decision)
     orc.handle_leader_task(leader_task)
 
     # Child task should have the handoff_prompt
@@ -173,7 +173,7 @@ def test_squad_loop_with_failing_member(store):
 
     call_count = [0]
 
-    def counting_decide(briefing, issue):
+    def counting_decide(briefing, issue, completed_results=None):
         call_count[0] += 1
         from ariadne.models import DelegationDecision
         entry = briefing.roster[0]

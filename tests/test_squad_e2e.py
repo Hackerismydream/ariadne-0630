@@ -10,7 +10,7 @@ import pytest
 
 from ariadne.backends import get_backend
 from ariadne.daemon import Daemon
-from ariadne.models import AssigneeType, IssueStatus, TaskStatus
+from ariadne.models import AssigneeType, IssueStatus
 from ariadne.orchestrator import Orchestrator
 from ariadne.store import Store
 
@@ -46,7 +46,7 @@ def test_squad_full_loop(store):
     # Custom decider: delegate on first call, return None on second (re-evaluation)
     call_count = [0]
 
-    def counting_decide(briefing, issue):
+    def counting_decide(briefing, issue, completed_results=None):
         call_count[0] += 1
         if call_count[0] == 1:
             # First activation: delegate to the member

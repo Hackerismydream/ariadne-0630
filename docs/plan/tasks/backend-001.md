@@ -1,6 +1,6 @@
 id: backend-001
 scope: backend
-status: pending
+status: done
 depends-on: [squad-003]
 ```
 

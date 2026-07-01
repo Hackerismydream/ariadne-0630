@@ -73,6 +73,22 @@ def _skill_payload(skill) -> dict:
     }
 
 
+def _benchmark_run_payload(run) -> dict:
+    return {
+        "id": run.id,
+        "suite_name": run.suite_name,
+        "case_name": run.case_name,
+        "issue_id": run.issue_id,
+        "runtime_policy": run.runtime_policy,
+        "status": run.status,
+        "started_at": run.started_at.isoformat(),
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "summary": run.summary,
+        "artifact_dir": run.artifact_dir,
+        "metrics": run.metrics,
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     """Serve the single-page HTML dashboard."""
@@ -273,6 +289,28 @@ def get_skill(skill_id: str):
         store.close()
         raise HTTPException(status_code=404, detail="skill not found")
     payload = _skill_payload(skill)
+    store.close()
+    return payload
+
+
+@app.get("/api/benchmark-runs")
+def list_benchmark_runs():
+    """List BenchmarkRuns."""
+    store = _get_store()
+    runs = store.list_benchmark_runs()
+    store.close()
+    return [_benchmark_run_payload(run) for run in runs]
+
+
+@app.get("/api/benchmark-runs/{benchmark_run_id}")
+def get_benchmark_run(benchmark_run_id: str):
+    """Inspect one BenchmarkRun."""
+    store = _get_store()
+    run = store.get_benchmark_run(benchmark_run_id)
+    if run is None:
+        store.close()
+        raise HTTPException(status_code=404, detail="benchmark run not found")
+    payload = _benchmark_run_payload(run)
     store.close()
     return payload
 

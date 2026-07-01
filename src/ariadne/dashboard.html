@@ -64,6 +64,10 @@
       <h2>Skills</h2>
       <div id="skills"><div class="empty">Loading...</div></div>
     </div>
+    <div class="section">
+      <h2>BenchmarkRuns</h2>
+      <div id="benchmark-runs"><div class="empty">Loading...</div></div>
+    </div>
   </div>
   <div class="right">
     <div class="section">
@@ -99,6 +103,7 @@ async function refresh() {
       runtimeCapabilities,
       agentProfiles,
       skills,
+      benchmarkRuns,
     ] = await Promise.all([
       fetchJSON('/api/issues'),
       fetchJSON('/api/taskruns'),
@@ -107,6 +112,7 @@ async function refresh() {
       fetchJSON('/api/runtime-capabilities'),
       fetchJSON('/api/agent-profiles'),
       fetchJSON('/api/skills'),
+      fetchJSON('/api/benchmark-runs'),
     ]);
     renderIssues(issues);
     renderTaskRuns(taskruns);
@@ -115,6 +121,7 @@ async function refresh() {
     renderRuntimeCapabilities(runtimeCapabilities);
     renderAgentProfiles(agentProfiles);
     renderSkills(skills);
+    renderBenchmarkRuns(benchmarkRuns);
   } catch (e) {
     document.getElementById('issues').innerHTML = '<div class="empty">Failed to load. Is the API running?</div>';
   }
@@ -183,6 +190,14 @@ function renderSkills(skills) {
   if (!skills.length) { el.innerHTML = '<div class="empty">No Skills.</div>'; return; }
   el.innerHTML = skills.map(s =>
     `<div class="item">${s.name}<br><small>tools=${s.tools_allowed.join(', ') || 'none'} version=${s.version || 'unversioned'}</small></div>`
+  ).join('');
+}
+
+function renderBenchmarkRuns(benchmarkRuns) {
+  const el = document.getElementById('benchmark-runs');
+  if (!benchmarkRuns.length) { el.innerHTML = '<div class="empty">No BenchmarkRuns.</div>'; return; }
+  el.innerHTML = benchmarkRuns.map(b =>
+    `<div class="item"><span class="badge ${b.status}">${b.status}</span> ${b.suite_name}/${b.case_name}<br><small>success=${b.summary.success} taskruns=${b.metrics.taskrun_count || 0} leases=${b.metrics.runtime_lease_count || 0}</small></div>`
   ).join('');
 }
 

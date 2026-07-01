@@ -405,6 +405,22 @@ class ExecutionPolicyDecision(BaseModel):
     details: dict = Field(default_factory=dict)
 
 
+class BenchmarkRun(BaseModel):
+    """Persisted benchmark case evidence derived from product facts."""
+
+    id: str
+    suite_name: str
+    case_name: str
+    issue_id: str
+    runtime_policy: dict = Field(default_factory=dict)
+    status: str
+    started_at: datetime
+    completed_at: datetime | None = None
+    summary: dict = Field(default_factory=dict)
+    artifact_dir: str = ""
+    metrics: dict = Field(default_factory=dict)
+
+
 class ExecutionResult(BaseModel):
     """Output of an ExecutionBackend."""
 

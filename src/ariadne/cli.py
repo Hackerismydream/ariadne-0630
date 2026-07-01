@@ -526,6 +526,24 @@ def benchmark_run(
     store.close()
 
 
+@app.command()
+def benchmark_list():
+    """List persisted BenchmarkRuns."""
+    store = _get_store()
+    runs = store.list_benchmark_runs()
+    if not runs:
+        typer.echo("No benchmark runs.")
+        store.close()
+        return
+    for run in runs:
+        success = run.summary.get("success")
+        typer.echo(
+            f"  {run.id}  [{run.status}]  {run.suite_name}/{run.case_name}  "
+            f"issue={run.issue_id}  success={success}"
+        )
+    store.close()
+
+
 # ---------------------------------------------------------------------------
 # Squad run command
 # ---------------------------------------------------------------------------

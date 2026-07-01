@@ -18,6 +18,7 @@ from ariadne.models import (
     AgentProfile,
     AgentProfileStatus,
     AssigneeType,
+    BenchmarkRun,
     FailureReason,
     Issue,
     IssueStatus,
@@ -213,6 +214,23 @@ CREATE TABLE IF NOT EXISTS leader_decision (
 CREATE INDEX IF NOT EXISTS idx_leader_decision_issue_time
     ON leader_decision(issue_id, created_at);
 
+CREATE TABLE IF NOT EXISTS benchmark_run (
+    id TEXT PRIMARY KEY,
+    suite_name TEXT NOT NULL,
+    case_name TEXT NOT NULL,
+    issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+    runtime_policy_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    artifact_dir TEXT NOT NULL DEFAULT '',
+    metrics_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_benchmark_run_suite_case
+    ON benchmark_run(suite_name, case_name, started_at);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id TEXT PRIMARY KEY,
     trace_id TEXT NOT NULL,
@@ -389,6 +407,24 @@ class Store:
             delegation_payload=json.loads(row["delegation_payload_json"]),
             created_taskrun_ids=json.loads(row["created_taskrun_ids_json"]),
             created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_benchmark_run(row: sqlite3.Row) -> BenchmarkRun:
+        return BenchmarkRun(
+            id=row["id"],
+            suite_name=row["suite_name"],
+            case_name=row["case_name"],
+            issue_id=row["issue_id"],
+            runtime_policy=json.loads(row["runtime_policy_json"]),
+            status=row["status"],
+            started_at=datetime.fromisoformat(row["started_at"]),
+            completed_at=datetime.fromisoformat(row["completed_at"])
+            if row["completed_at"]
+            else None,
+            summary=json.loads(row["summary_json"]),
+            artifact_dir=row["artifact_dir"],
+            metrics=json.loads(row["metrics_json"]),
         )
 
     @staticmethod
@@ -1093,6 +1129,77 @@ class Store:
                 (issue_id,),
             ).fetchall()
         return [self._row_to_leader_decision(r) for r in rows]
+
+    def create_benchmark_run(
+        self,
+        suite_name: str,
+        case_name: str,
+        issue_id: str,
+        runtime_policy: dict | None = None,
+        artifact_dir: str = "",
+        status: str = "running",
+    ) -> BenchmarkRun:
+        run_id = _new_id("bench")
+        started_at = _now_iso()
+        self._conn.execute(
+            """INSERT INTO benchmark_run
+               (id, suite_name, case_name, issue_id, runtime_policy_json, status,
+                started_at, artifact_dir)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id,
+                suite_name,
+                case_name,
+                issue_id,
+                json.dumps(runtime_policy or {}),
+                status,
+                started_at,
+                artifact_dir,
+            ),
+        )
+        self._conn.commit()
+        run = self.get_benchmark_run(run_id)
+        if run is None:
+            raise KeyError(f"benchmark run not found: {run_id}")
+        return run
+
+    def complete_benchmark_run(
+        self,
+        benchmark_run_id: str,
+        status: str,
+        summary: dict,
+        metrics: dict,
+    ) -> BenchmarkRun:
+        self._conn.execute(
+            """UPDATE benchmark_run
+               SET status = ?, completed_at = ?, summary_json = ?,
+                   metrics_json = ?
+               WHERE id = ?""",
+            (
+                status,
+                _now_iso(),
+                json.dumps(summary),
+                json.dumps(metrics),
+                benchmark_run_id,
+            ),
+        )
+        self._conn.commit()
+        run = self.get_benchmark_run(benchmark_run_id)
+        if run is None:
+            raise KeyError(f"benchmark run not found: {benchmark_run_id}")
+        return run
+
+    def get_benchmark_run(self, benchmark_run_id: str) -> BenchmarkRun | None:
+        row = self._conn.execute(
+            "SELECT * FROM benchmark_run WHERE id = ?", (benchmark_run_id,)
+        ).fetchone()
+        return self._row_to_benchmark_run(row) if row else None
+
+    def list_benchmark_runs(self) -> list[BenchmarkRun]:
+        rows = self._conn.execute(
+            "SELECT * FROM benchmark_run ORDER BY started_at DESC, id DESC"
+        ).fetchall()
+        return [self._row_to_benchmark_run(r) for r in rows]
 
     def create_issue(
         self,

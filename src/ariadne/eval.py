@@ -11,10 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from ariadne.models import TaskStatus
+from ariadne.models import FailureReason, IssueStatus, TaskStatus
 from ariadne.store import Store
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ class BenchmarkTask:
     description: str
     backend: str
     expected_success: bool
+    suite_name: str = "default"
+    runtime_policy: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -50,6 +53,8 @@ class BenchmarkReport:
     avg_duration_seconds: float
     retry_count: int
     failure_reasons: dict[str, int] = field(default_factory=dict)
+    failure_classes: dict[str, int] = field(default_factory=dict)
+    benchmark_run_ids: list[str] = field(default_factory=list)
     tasks: list[dict] = field(default_factory=list)
 
 
@@ -164,38 +169,209 @@ def run_benchmark(
 
 
 def _default_execute(store: Store, bt: BenchmarkTask) -> dict:
-    """Default execution: create agent + issue + enqueue + simulate."""
-    from ariadne.models import AssigneeType
-
-    agent = store.create_agent(f"Benchmark-{bt.title}", "", [bt.backend], [])
-    issue = store.create_issue(bt.title, bt.description, AssigneeType.AGENT, agent.id)
-    task = store.enqueue_task(issue.id, agent.id)
-
-    # Simulate execution via daemon with dry-run
+    """Default execution: seed product objects and compute facts after daemon run."""
     from ariadne.backends import get_backend
     from ariadne.daemon import Daemon
+    from ariadne.models import (
+        AssigneeType,
+        DelegationDecision,
+        LeaderDecision,
+        LeaderDecisionOutcome,
+    )
+    from ariadne.orchestrator import Orchestrator
+
+    slug = _slug(bt.title)
+    artifact_dir = tempfile.mkdtemp(prefix=f"ariadne-benchmark-{slug}-")
+    runtime_policy = {
+        "backend": bt.backend,
+        "expected_success": bt.expected_success,
+        **bt.runtime_policy,
+    }
+
+    leader = store.create_agent_profile(
+        name=f"Benchmark Leader {bt.title}",
+        instructions="Coordinate the benchmark case.",
+        preferred_capabilities=["dry-run"],
+        runtime_policy={"allow_real_execution": False},
+    )
+    member = store.create_agent_profile(
+        name=f"Benchmark Worker {bt.title}",
+        instructions="Execute the benchmark case.",
+        preferred_capabilities=[bt.backend],
+        runtime_policy=bt.runtime_policy,
+    )
+    skill = store.create_skill(
+        name=f"benchmark-{slug}",
+        description="Benchmark case skill",
+        when_to_use=bt.description,
+        prompt_snippet="Execute the benchmark case and report observable facts.",
+        tools_allowed=[bt.backend],
+        test_command=bt.runtime_policy.get("test_command"),
+        source_path="benchmark",
+        version="1",
+    )
+    store.bind_skill_to_agent_profile(member.id, skill.id)
+
+    squad = store.create_squad(
+        f"Benchmark Squad {bt.title}",
+        leader.id,
+        instructions="Delegate once, then evaluate facts and close when done.",
+    )
+    store.add_squad_member(squad.id, member.id, role="benchmark-worker")
+    issue = store.create_issue(bt.title, bt.description, AssigneeType.SQUAD, squad.id)
+    run = store.create_benchmark_run(
+        suite_name=bt.suite_name,
+        case_name=bt.title,
+        issue_id=issue.id,
+        runtime_policy=runtime_policy,
+        artifact_dir=artifact_dir,
+    )
+    store.enqueue_taskrun(issue.id, leader.id, squad_id=squad.id)
+
+    call_count = [0]
+
+    def decide(briefing, issue, completed_results=None):
+        call_count[0] += 1
+        if not completed_results:
+            entry = briefing.roster[0]
+            return DelegationDecision(
+                target_agent_id=entry.agent_id,
+                backend=bt.backend,
+                handoff_prompt=f"{bt.title}\n\n{bt.description}",
+                reason="benchmark action",
+                skill_refs=entry.skills,
+            )
+        return LeaderDecision(
+            outcome=LeaderDecisionOutcome.DONE,
+            reason="benchmark member task produced terminal facts",
+        )
 
     daemon = Daemon(
         store=store,
         backend_factory=get_backend,
         poll_interval=0.001,
+        orchestrator=Orchestrator(store=store, llm_decide=decide),
+        target_repo_path=artifact_dir,
     )
-    daemon.start(max_iterations=3)
+    daemon.start(max_iterations=10)
 
-    finished = store.get_task(task.id)
-    success = finished.status == TaskStatus.COMPLETED if finished else False
-    duration = 0.0
-    if finished and finished.completed_at and finished.started_at:
-        duration = (finished.completed_at - finished.started_at).total_seconds()
+    refreshed_issue = store.get_issue(issue.id)
+    metrics = collect_benchmark_metrics(store, issue.id)
+    success = (
+        refreshed_issue is not None
+        and refreshed_issue.status == IssueStatus.DONE
+        and metrics["failed_taskrun_count"] == 0
+    )
+    passed = success == bt.expected_success
+    summary = {
+        "success": success,
+        "expected_success": bt.expected_success,
+        "passed": passed,
+        "failure_classes": metrics["failure_classes"],
+    }
+    run = store.complete_benchmark_run(
+        run.id,
+        status="completed" if passed else "failed",
+        summary=summary,
+        metrics=metrics,
+    )
 
     return {
-        "task_id": task.id,
+        "benchmark_run_id": run.id,
+        "issue_id": issue.id,
+        "task_id": metrics["primary_taskrun_id"],
         "title": bt.title,
         "success": success,
-        "duration_seconds": duration,
-        "retry_count": 0,
-        "failure_reason": finished.failure_reason.value if finished and finished.failure_reason else None,
+        "duration_seconds": metrics["duration_seconds"],
+        "retry_count": metrics["retry_count"],
+        "failure_reason": metrics["primary_failure_reason"],
+        "failure_classes": metrics["failure_classes"],
+        "metrics": metrics,
     }
+
+
+def collect_benchmark_metrics(store: Store, issue_id: str) -> dict:
+    """Compute BenchmarkRun metrics strictly from persisted product facts."""
+    rows = store._conn.execute(
+        "SELECT * FROM task WHERE issue_id = ? ORDER BY created_at", (issue_id,)
+    ).fetchall()
+    taskruns = [store._row_to_taskrun(row) for row in rows]
+    timeline = store.get_issue_timeline(issue_id)
+    leader_decisions = store.list_leader_decisions(issue_id)
+    leases = []
+    for taskrun in taskruns:
+        leases.extend(store.list_runtime_leases(taskrun.id))
+
+    failed = [taskrun for taskrun in taskruns if taskrun.status == TaskStatus.FAILED]
+    completed = [
+        taskrun for taskrun in taskruns if taskrun.status == TaskStatus.COMPLETED
+    ]
+    retry_count = sum(1 for taskrun in taskruns if taskrun.parent_taskrun_id)
+    failure_reasons: dict[str, int] = {}
+    failure_classes: dict[str, int] = {}
+    primary_failure_reason = None
+    for taskrun in failed:
+        if taskrun.failure_reason is None:
+            continue
+        reason = taskrun.failure_reason.value
+        primary_failure_reason = primary_failure_reason or reason
+        failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+        failure_class = classify_failure(reason, timeline)
+        failure_classes[failure_class] = failure_classes.get(failure_class, 0) + 1
+
+    durations = []
+    for taskrun in taskruns:
+        if taskrun.started_at and taskrun.completed_at:
+            durations.append((taskrun.completed_at - taskrun.started_at).total_seconds())
+
+    policy_blocks = [
+        event for event in timeline if event.event_type == "execution_policy_blocked"
+    ]
+    lease_events = [
+        event for event in timeline if event.event_type in {"lease_expired", "lease_revoked"}
+    ]
+    return {
+        "taskrun_count": len(taskruns),
+        "completed_taskrun_count": len(completed),
+        "failed_taskrun_count": len(failed),
+        "runtime_lease_count": len(leases),
+        "leader_decision_count": len(leader_decisions),
+        "issue_timeline_event_count": len(timeline),
+        "policy_block_count": len(policy_blocks),
+        "lease_event_count": len(lease_events),
+        "retry_count": retry_count,
+        "duration_seconds": round(sum(durations), 4),
+        "failure_reasons": failure_reasons,
+        "failure_classes": failure_classes,
+        "primary_failure_reason": primary_failure_reason,
+        "primary_taskrun_id": taskruns[0].id if taskruns else None,
+    }
+
+
+def classify_failure(reason: str, timeline: list | None = None) -> str:
+    """Map failure reasons and timeline facts into report buckets."""
+    timeline = timeline or []
+    if any(event.event_type == "execution_policy_blocked" for event in timeline):
+        return "policy"
+    if any(event.event_type == "lease_expired" for event in timeline):
+        return "lease"
+    if reason == FailureReason.POLICY_BLOCKED.value:
+        return "policy"
+    if reason in {
+        FailureReason.RUNTIME_OFFLINE.value,
+        FailureReason.RUNTIME_RECOVERY.value,
+        FailureReason.TIMEOUT.value,
+    }:
+        return "runtime"
+    if reason == FailureReason.MANUAL.value:
+        return "manual_cancellation"
+    if reason == "provider_error":
+        return "provider"
+    if reason == "verifier_error":
+        return "verifier"
+    if reason == "test_failure":
+        return "test"
+    return "agent"
 
 
 def _build_report(results: list[dict]) -> BenchmarkReport:
@@ -218,10 +394,23 @@ def _build_report(results: list[dict]) -> BenchmarkReport:
     retry_count = sum(r.get("retry_count", 0) for r in results)
 
     failure_reasons: dict[str, int] = {}
+    failure_classes: dict[str, int] = {}
+    benchmark_run_ids: list[str] = []
     for r in results:
+        if r.get("benchmark_run_id"):
+            benchmark_run_ids.append(r["benchmark_run_id"])
         reason = r.get("failure_reason")
         if reason:
             failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+        result_failure_classes = r.get("failure_classes", {})
+        if result_failure_classes:
+            classes_to_merge = result_failure_classes
+        elif reason:
+            classes_to_merge = {classify_failure(reason): 1}
+        else:
+            classes_to_merge = {}
+        for failure_class, count in classes_to_merge.items():
+            failure_classes[failure_class] = failure_classes.get(failure_class, 0) + count
 
     return BenchmarkReport(
         total_tasks=total,
@@ -231,6 +420,8 @@ def _build_report(results: list[dict]) -> BenchmarkReport:
         avg_duration_seconds=round(avg_duration, 4),
         retry_count=retry_count,
         failure_reasons=failure_reasons,
+        failure_classes=failure_classes,
+        benchmark_run_ids=benchmark_run_ids,
         tasks=results,
     )
 
@@ -246,5 +437,11 @@ def report_to_dict(report: BenchmarkReport) -> dict:
         "avg_duration_seconds": report.avg_duration_seconds,
         "retry_count": report.retry_count,
         "failure_reasons": report.failure_reasons,
+        "failure_classes": report.failure_classes,
+        "benchmark_run_ids": report.benchmark_run_ids,
         "tasks": report.tasks,
     }
+
+
+def _slug(value: str) -> str:
+    return "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-") or "case"

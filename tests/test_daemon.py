@@ -3,6 +3,9 @@
 Per docs/plan/tasks/core-003.md "test_daemon.py must cover".
 """
 
+import shlex
+import sys
+
 import pytest
 from typer.testing import CliRunner
 
@@ -247,6 +250,143 @@ def test_dry_run_backend_default(daemon, agent_with_task, store):
     finished = store.get_task(claimed.id)
     assert finished.status == TaskStatus.COMPLETED
     assert finished.result["backend_name"] == "dry-run"
+
+
+def test_daemon_passes_resume_session_and_mcp_config_to_backend(store, tmp_path):
+    """same-trace follow-up tasks resume the latest provider session."""
+    backend_name = "capture-resume"
+    captured_contexts = []
+
+    class CapturingBackend:
+        name = backend_name
+
+        def is_available(self):
+            return True
+
+        def execute(self, context, on_progress=None):
+            captured_contexts.append(context)
+            return ExecutionResult(
+                backend_name=backend_name,
+                success=True,
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                diff=None,
+                changed_files=[],
+                failure_reason=None,
+                duration_seconds=0.01,
+                command="capture",
+                command_cwd=str(tmp_path),
+                execution_repo_path=str(tmp_path),
+                session_id="sess-2",
+            )
+
+    mcp_path = tmp_path / "mcp.json"
+    mcp_path.write_text("{}")
+    profile = store.create_agent_profile(
+        name="Continuity Agent",
+        instructions="Continue prior provider sessions.",
+        preferred_capabilities=[backend_name],
+        runtime_policy={"mcp_config_path": str(mcp_path)},
+    )
+    issue = store.create_issue("Continue task", "", AssigneeType.AGENT, profile.id)
+    trace_id = "trace-continuity"
+
+    first = store.enqueue_taskrun(issue.id, profile.id, trace_id=trace_id)
+    first_claimed = store.claim_task(profile.id, "rt-seed")
+    assert first_claimed is not None
+    store.start_task(first.id)
+    store.complete_task(first.id, {"metadata": {"session_id": "sess-1"}})
+
+    second = store.enqueue_taskrun(issue.id, profile.id, trace_id=trace_id)
+    second_claimed = store.claim_task(profile.id, "rt-capture")
+    assert second_claimed is not None
+
+    daemon = Daemon(
+        store=store,
+        backend_factory=lambda name: CapturingBackend(),
+        runtime_id="rt-capture",
+        poll_interval=0.01,
+        target_repo_path=str(tmp_path),
+    )
+    daemon._execute_task(second_claimed)
+
+    assert store.get_task(second.id).status == TaskStatus.COMPLETED
+    assert captured_contexts[0].resume_session_id == "sess-1"
+    assert captured_contexts[0].mcp_config_path == str(mcp_path)
+
+
+def test_skill_verification_records_evidence_without_failing_task(store, tmp_path):
+    """Skill verification failure is persisted as evidence, not task failure."""
+    backend_name = "capture-verification"
+    captured_contexts = []
+
+    class CapturingBackend:
+        name = backend_name
+
+        def is_available(self):
+            return True
+
+        def execute(self, context, on_progress=None):
+            captured_contexts.append(context)
+            return ExecutionResult(
+                backend_name=backend_name,
+                success=True,
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                diff=None,
+                changed_files=[],
+                failure_reason=None,
+                duration_seconds=0.01,
+                command="capture",
+                command_cwd=str(tmp_path),
+                execution_repo_path=str(tmp_path),
+            )
+
+    verification_command = (
+        f"{shlex.quote(sys.executable)} -c "
+        f"{shlex.quote('import sys; sys.exit(7)')}"
+    )
+    profile = store.create_agent_profile(
+        name="Verification Agent",
+        instructions="Run skill verification after execution.",
+        preferred_capabilities=[backend_name],
+    )
+    skill = store.create_skill(
+        name="verify-failure",
+        description="Always fails for evidence testing.",
+        tools_allowed=[backend_name],
+        test_command=verification_command,
+    )
+    store.bind_skill_to_agent_profile(profile.id, skill.id)
+    issue = store.create_issue("Verify evidence", "", AssigneeType.AGENT, profile.id)
+    task = store.enqueue_taskrun(issue.id, profile.id)
+    claimed = store.claim_task(profile.id, "rt-verify")
+    assert claimed is not None
+
+    daemon = Daemon(
+        store=store,
+        backend_factory=lambda name: CapturingBackend(),
+        runtime_id="rt-verify",
+        poll_interval=0.01,
+        target_repo_path=str(tmp_path),
+    )
+    daemon._execute_task(claimed)
+
+    finished = store.get_task(task.id)
+    assert finished.status == TaskStatus.COMPLETED
+    assert captured_contexts[0].test_command is None
+    verification = finished.result["skill_verifications"][0]
+    assert verification["skill_name"] == "verify-failure"
+    assert verification["passed"] is False
+    assert verification["exit_code"] == 7
+    assert any(
+        event["event"] == "verification_failed"
+        for event in store.get_timeline(task.trace_id)
+    )
+    issue_events = store.get_issue_timeline(issue.id)
+    assert any(event.event_type == "tests_reported" for event in issue_events)
 
 
 # ---------------------------------------------------------------------------

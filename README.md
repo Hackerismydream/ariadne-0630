@@ -26,7 +26,8 @@ Reference: [multica](https://github.com/multica-ai/multica) (38k★, Go + Next.j
 │  Execution Layer                                          │
 │  backends.py        ExecutionBackend protocol             │
 │                     CodexBackend, ClaudeBackend, DryRun   │
-│                     Safety gate, diff capture, timeout    │
+│                     Registry, resume, MCP, safety gate,   │
+│                     worktree diff, timeout                │
 ├──────────────────────────────────────────────────────────┤
 │  SQLite (ariadne.db)                                      │
 │  Tables: issue, taskrun/task, runtime, lease, profile,    │
@@ -55,6 +56,10 @@ ariadne issue-list
 
 # Run benchmark
 ariadne benchmark-run --iterations 5 --backend dry-run
+
+# Compare serial vs bounded squad execution.
+# Dry-run output is labelled simulated; real backends require the external gate.
+ariadne benchmark-compare --tasks 5 --backend dry-run --max-concurrent 2
 ```
 
 ## Five-Minute v1 Demo
@@ -114,7 +119,8 @@ uv run pytest tests/ -v
 The suite covers state transitions, atomic claim, TaskRun compatibility,
 runtime registration, leases, IssueTimeline, AgentProfiles, Skills,
 LeaderDecisions, ExecutionPolicy, BenchmarkRuns, squad orchestration, backend
-safety gates, and the clean-checkout demo.
+safety gates, backend registry extension, session resume, MCP config injection,
+skill verification evidence, and the clean-checkout demo.
 
 ## Benchmark Evidence
 
@@ -138,6 +144,9 @@ routing, local pytest/ruff, and GitHub CI are reported as separate accounts.
 CI pass rate is only reportable from GitHub reported checks; local pytest is
 not a substitute for CI. Live Codex/Claude patch success requires explicit
 external execution and is not mixed with dry-run or synthetic smoke results.
+`ariadne benchmark-compare` follows the same rule: dry-run comparisons report
+`simulated: true`; real backend comparisons report `blocked` until
+`ARIADNE_ENABLE_EXTERNAL_EXECUTION=1` is set and the provider CLI is available.
 
 ## Project Structure
 

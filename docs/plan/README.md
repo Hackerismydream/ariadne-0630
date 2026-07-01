@@ -20,6 +20,7 @@ mergeable — after each phase ships, the system is in a usable state.
 | eval-001 | pending | Evaluation layer (LLM-as-judge + benchmark harness) |
 | polish-001 | pending | CLI commands + README + architecture diagram |
 | polish-002 | pending | Test coverage gap fill + benchmark data collection |
+| deep-005 | implemented | Agent platform foundations: backend registry, truthful comparison, resume/MCP inputs, skill materialization, verification evidence |
 
 ## Phases
 

@@ -312,6 +312,8 @@ class Store:
     def __init__(self, db_path: str = "ariadne.db"):
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        if db_path != ":memory:":
+            self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         import threading
@@ -1928,14 +1930,23 @@ class Store:
         self, agent_profile_id: str, handoff_prompt: str | None
     ) -> str | None:
         skills = self.list_skills_for_agent_profile(agent_profile_id)
-        snippets = [
-            f"- {skill.name}: {skill.prompt_snippet}"
-            for skill in skills
-            if skill.prompt_snippet
-        ]
-        if not snippets:
+        blocks = []
+        for skill in skills:
+            lines = [f"### {skill.name}"]
+            if skill.description:
+                lines.append(f"Routing description: {skill.description}")
+            if skill.when_to_use:
+                lines.append(f"When to use: {skill.when_to_use}")
+            if skill.prompt_snippet:
+                lines.append(f"Prompt content: {skill.prompt_snippet}")
+            if skill.tools_allowed:
+                lines.append(f"Allowed tools: {', '.join(skill.tools_allowed)}")
+            if skill.test_command:
+                lines.append(f"Verification command: {skill.test_command}")
+            blocks.append("\n".join(lines))
+        if not blocks:
             return handoff_prompt
-        section = "Skill routing guidance:\n" + "\n".join(snippets)
+        section = "Skill capability package:\n" + "\n\n".join(blocks)
         if not handoff_prompt:
             return section
         return f"{handoff_prompt}\n\n{section}"

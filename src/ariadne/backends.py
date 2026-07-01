@@ -59,6 +59,8 @@ _SUPPORTED_PLACEHOLDERS = {
     "model",
     "effort",
     "system_prompt",
+    "resume_session_id",
+    "mcp_config",
 }
 
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
@@ -80,6 +82,8 @@ def render_command(
         "model": shlex.quote(context.model or ""),
         "effort": shlex.quote(context.effort or ""),
         "system_prompt": shlex.quote(context.agent_instructions or ""),
+        "resume_session_id": shlex.quote(context.resume_session_id or ""),
+        "mcp_config": shlex.quote(context.mcp_config_path or ""),
     }
 
     def replace(match: re.Match) -> str:
@@ -231,8 +235,23 @@ class _ShellBackend:
         """Override in subclasses to parse structured output. Default: passthrough."""
         return stdout, None
 
-    def _command_template(self) -> str:
+    def _command_template(self, context: ExecutionContext) -> str:
         return os.environ.get(self.template_env_var, self.default_template)
+
+    def _resume_fragment(self, context: ExecutionContext) -> str:
+        return ""
+
+    def _mcp_fragment(self, context: ExecutionContext) -> str:
+        return ""
+
+    def _render_template(self, context: ExecutionContext) -> str:
+        template = self._command_template(context)
+        fragments = [
+            self._resume_fragment(context),
+            self._mcp_fragment(context),
+        ]
+        suffix = " ".join(fragment for fragment in fragments if fragment)
+        return f"{template} {suffix}" if suffix else template
 
     def execute(
         self,
@@ -313,7 +332,7 @@ class _ShellBackend:
         try:
             try:
                 command = render_command(
-                    self._command_template(),
+                    self._render_template(context),
                     context,
                     handoff_file.name,
                     execution_repo_path=exec_path,
@@ -509,6 +528,9 @@ class CodexBackend(_ShellBackend):
     default_template = "codex exec --cd {target_repo} - < {handoff_file}"
     executable_name = "codex"
 
+    def _mcp_fragment(self, context: ExecutionContext) -> str:
+        return "--mcp-config {mcp_config}" if context.mcp_config_path else ""
+
 
 # ---------------------------------------------------------------------------
 # ClaudeBackend
@@ -522,6 +544,12 @@ class ClaudeBackend(_ShellBackend):
     template_env_var = "ARIADNE_CLAUDE_COMMAND_TEMPLATE"
     default_template = "claude --print --output-format json < {handoff_file}"
     executable_name = "claude"
+
+    def _resume_fragment(self, context: ExecutionContext) -> str:
+        return "--resume {resume_session_id}" if context.resume_session_id else ""
+
+    def _mcp_fragment(self, context: ExecutionContext) -> str:
+        return "--mcp-config {mcp_config}" if context.mcp_config_path else ""
 
     @staticmethod
     def parse_output(stdout: str) -> tuple[str, dict | None]:
@@ -545,11 +573,19 @@ class ClaudeBackend(_ShellBackend):
 # Registry
 # ---------------------------------------------------------------------------
 
-_BACKENDS: dict[str, ExecutionBackend] = {
-    "dry-run": DryRunBackend(),
-    "codex": CodexBackend(),
-    "claude-code": ClaudeBackend(),
-}
+_BACKENDS: dict[str, ExecutionBackend] = {}
+
+
+def register_backend(backend: ExecutionBackend) -> None:
+    """Register an execution backend by name.
+
+    This is intentionally in-process only. Third-party entry-point discovery is
+    a later productization concern; this seam lets local extensions and tests
+    add harnesses without editing the registry literal.
+    """
+    if backend.name in _BACKENDS:
+        raise ValueError(f"backend already registered: {backend.name}")
+    _BACKENDS[backend.name] = backend
 
 
 def get_backend(name: str) -> ExecutionBackend:
@@ -561,3 +597,8 @@ def get_backend(name: str) -> ExecutionBackend:
 
 def available_backends() -> list[str]:
     return list(_BACKENDS.keys())
+
+
+register_backend(DryRunBackend())
+register_backend(CodexBackend())
+register_backend(ClaudeBackend())

@@ -64,8 +64,22 @@ def test_agent_profile_skill_binding_drives_briefing_and_handoff(tmp_path):
 
         assert taskrun.handoff_prompt is not None
         assert "Fix the parser." in taskrun.handoff_prompt
+        assert "Skill capability package:" in taskrun.handoff_prompt
+        assert "### python-fix" in taskrun.handoff_prompt
         assert "python-fix" in taskrun.handoff_prompt
+        assert "Allowed tools: pytest, ruff" in taskrun.handoff_prompt
+        assert "Verification command: uv run pytest -q" in taskrun.handoff_prompt
         assert "Always run targeted pytest before handoff." in taskrun.handoff_prompt
+    finally:
+        store.close()
+
+
+def test_file_backed_store_enables_wal_journal_mode(tmp_path):
+    db_path = tmp_path / "wal.db"
+    store = Store(str(db_path))
+    try:
+        row = store._conn.execute("PRAGMA journal_mode").fetchone()
+        assert row[0].lower() == "wal"
     finally:
         store.close()
 

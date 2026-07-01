@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
 
 from ariadne.models import (
-    FailureReason,
     RuntimeCapability,
     RuntimeCapabilityStatus,
     RuntimeLease,
     RuntimeLeaseStatus,
     RuntimeMachine,
     RuntimeMachineStatus,
-    TaskStatus,
 )
 
 from .base import DEFAULT_RUNTIME_MAX_CONCURRENT_TASKRUNS, _new_id, _now_iso
@@ -279,144 +276,53 @@ class RuntimeRepo:
             ),
         )
 
-    def mark_runtime_lease_revoked(
-        self, lease_id: str, released_at: str, reason: str
+    def touch_runtime_lease(
+        self, lease_id: str, heartbeat_at: str, expires_at: str
     ) -> None:
-        self._conn.execute(
-            """UPDATE runtime_lease
-               SET status = 'revoked', released_at = ?, revoke_reason = ?
-               WHERE id = ?""",
-            (released_at, reason, lease_id),
-        )
-
-    def heartbeat_runtime_lease(
-        self, lease_id: str, lease_seconds: int = 60
-    ) -> RuntimeLease:
-        now_dt = datetime.now(timezone.utc)
         self._conn.execute(
             """UPDATE runtime_lease
                SET last_heartbeat_at = ?, expires_at = ?
                WHERE id = ? AND status = 'active'""",
-            (
-                now_dt.isoformat(),
-                (now_dt + timedelta(seconds=lease_seconds)).isoformat(),
-                lease_id,
-            ),
+            (heartbeat_at, expires_at, lease_id),
         )
-        self._conn.commit()
-        lease = self.get_runtime_lease(lease_id)
-        if lease is None:
-            raise KeyError(f"runtime lease not found: {lease_id}")
-        return lease
 
-    def release_runtime_lease(self, lease_id: str) -> RuntimeLease:
-        now = _now_iso()
+    def mark_runtime_lease_released(
+        self, lease_id: str, released_at: str
+    ) -> None:
         self._conn.execute(
             """UPDATE runtime_lease
                SET status = 'released', released_at = ?
                WHERE id = ? AND status = 'active'""",
-            (now, lease_id),
+            (released_at, lease_id),
         )
-        self._conn.commit()
-        lease = self.get_runtime_lease(lease_id)
-        if lease is None:
-            raise KeyError(f"runtime lease not found: {lease_id}")
-        task = self.get_task(lease.taskrun_id)
-        if task and lease.status == RuntimeLeaseStatus.RELEASED:
-            self.append_issue_timeline_event(
-                task.issue_id,
-                "lease_released",
-                actor_type="runtime",
-                actor_id=lease.runtime_machine_id,
-                taskrun_id=task.id,
-                runtime_lease_id=lease.id,
-            )
-        return lease
 
-    def revoke_runtime_lease(
-        self, lease_id: str, reason: str = "revoked"
-    ) -> RuntimeLease:
-        now = _now_iso()
+    def mark_runtime_lease_revoked(
+        self,
+        lease_id: str,
+        released_at: str,
+        reason: str,
+        active_only: bool = False,
+    ) -> None:
+        active_clause = " AND status = 'active'" if active_only else ""
         self._conn.execute(
-            """UPDATE runtime_lease
+            f"""UPDATE runtime_lease
                SET status = 'revoked', released_at = ?, revoke_reason = ?
-               WHERE id = ? AND status = 'active'""",
-            (now, reason, lease_id),
+               WHERE id = ?{active_clause}""",
+            (released_at, reason, lease_id),
         )
-        self._conn.commit()
-        lease = self.get_runtime_lease(lease_id)
-        if lease is None:
-            raise KeyError(f"runtime lease not found: {lease_id}")
-        task = self.get_task(lease.taskrun_id)
-        if task and lease.status == RuntimeLeaseStatus.REVOKED:
-            self.append_issue_timeline_event(
-                task.issue_id,
-                "lease_revoked",
-                actor_type="system",
-                taskrun_id=task.id,
-                runtime_lease_id=lease.id,
-                payload={"reason": reason},
-            )
-        return lease
 
-    def expire_runtime_leases(self) -> list[RuntimeLease]:
-        now_dt = datetime.now(timezone.utc)
-        rows = self._conn.execute(
+    def select_expired_runtime_lease_rows(
+        self, expires_before: str
+    ) -> list[sqlite3.Row]:
+        return self._conn.execute(
             """SELECT * FROM runtime_lease
                WHERE status = 'active' AND expires_at < ?
                ORDER BY expires_at""",
-            (now_dt.isoformat(),),
+            (expires_before,),
         ).fetchall()
-        expired: list[RuntimeLease] = []
-        for row in rows:
-            self._conn.execute(
-                "UPDATE runtime_lease SET status = 'expired' WHERE id = ?",
-                (row["id"],),
-            )
-            task = self.get_task(row["taskrun_id"])
-            if task and task.status in (
-                TaskStatus.PREPARING,
-                TaskStatus.RUNNING,
-                TaskStatus.CLAIMED,
-            ):
-                self._conn.execute(
-                    """UPDATE task
-                       SET status = 'failed', failure_reason = ?,
-                           error = ?, completed_at = ?
-                       WHERE id = ?""",
-                    (
-                        FailureReason.RUNTIME_OFFLINE.value,
-                        "runtime lease expired",
-                        now_dt.isoformat(),
-                        task.id,
-                    ),
-                )
-                self.append_issue_timeline_event(
-                    task.issue_id,
-                    "lease_expired",
-                    actor_type="system",
-                    taskrun_id=task.id,
-                    runtime_lease_id=row["id"],
-                )
-                self.append_issue_timeline_event(
-                    task.issue_id,
-                    "taskrun_failed",
-                    actor_type="system",
-                    taskrun_id=task.id,
-                    runtime_lease_id=row["id"],
-                    payload={
-                        "error": "runtime lease expired",
-                        "failure_reason": FailureReason.RUNTIME_OFFLINE.value,
-                    },
-                )
-            expired.append(
-                RuntimeLease(
-                    **{
-                        **self.row_to(RuntimeLease, row).model_dump(),
-                        "status": RuntimeLeaseStatus.EXPIRED,
-                    }
-                )
-            )
-        if rows:
-            self._conn.commit()
-        return expired
+
+    def mark_runtime_lease_expired(self, lease_id: str) -> None:
+        self._conn.execute(
+            "UPDATE runtime_lease SET status = 'expired' WHERE id = ?",
+            (lease_id,),
+        )

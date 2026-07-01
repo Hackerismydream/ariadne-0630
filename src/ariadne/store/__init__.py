@@ -6,8 +6,8 @@ lightweight repository and service layers.
 
 from __future__ import annotations
 
-from ariadne.models import FailureReason, Task, TaskRun, TaskRunClaim
-from ariadne.service import TaskService
+from ariadne.models import FailureReason, RuntimeLease, Task, TaskRun, TaskRunClaim
+from ariadne.service import LeaseService, TaskService
 
 from .base import (
     InvalidStateTransition,
@@ -27,6 +27,7 @@ class Store(BenchmarkRepo, IssueRepo, RuntimeRepo, SkillRepo, SquadRepo, TaskRep
 
     def __init__(self, db_path: str = "ariadne.db"):
         super().__init__(db_path)
+        self.lease_service = LeaseService(self)
         self.task_service = TaskService(self)
 
     def claim_taskrun_for_runtime_machine(
@@ -79,6 +80,25 @@ class Store(BenchmarkRepo, IssueRepo, RuntimeRepo, SkillRepo, SquadRepo, TaskRep
 
     def recover_stale_claims(self, stale_timeout_seconds: float = 60.0) -> int:
         return self.task_service.recover_stale_claims(stale_timeout_seconds)
+
+    def heartbeat_runtime_lease(
+        self, lease_id: str, lease_seconds: int = 60
+    ) -> RuntimeLease:
+        return self.lease_service.heartbeat_runtime_lease(
+            lease_id,
+            lease_seconds=lease_seconds,
+        )
+
+    def release_runtime_lease(self, lease_id: str) -> RuntimeLease:
+        return self.lease_service.release_runtime_lease(lease_id)
+
+    def revoke_runtime_lease(
+        self, lease_id: str, reason: str = "revoked"
+    ) -> RuntimeLease:
+        return self.lease_service.revoke_runtime_lease(lease_id, reason)
+
+    def expire_runtime_leases(self) -> list[RuntimeLease]:
+        return self.lease_service.expire_runtime_leases()
 
 
 __all__ = [

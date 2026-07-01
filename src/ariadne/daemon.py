@@ -45,6 +45,7 @@ class Daemon:
         stale_claim_timeout: float = 60.0,
         orchestrator=None,
         target_repo_path: str = ".",
+        write_workspace: bool = False,
     ):
         self.store = store
         self.backend_factory = backend_factory
@@ -54,6 +55,7 @@ class Daemon:
         self.stale_claim_timeout = stale_claim_timeout
         self.orchestrator = orchestrator
         self.target_repo_path = target_repo_path
+        self.write_workspace = write_workspace
         self._running = False
         self._last_heartbeat: datetime | None = None
         self._runtime_registered = False
@@ -216,7 +218,7 @@ class Daemon:
             handoff_prompt=task.handoff_prompt or f"Execute task for issue {task.issue_id}",
             target_repo_path=self.target_repo_path,
             skill_refs=skill_refs,
-            confirm_execution=True,
+            confirm_execution=self.write_workspace,
             trace_id=task.trace_id,
             resume_session_id=self._resume_session_id_for_task(task),
             mcp_config_path=mcp_config_path,

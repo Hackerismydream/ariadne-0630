@@ -34,42 +34,97 @@ def _make_context(**overrides) -> ExecutionContext:
         "target_repo_path": "/tmp/test-repo",
         "skill_refs": [],
         "timeout_seconds": 60,
-        "confirm_execution": True,
+        "confirm_execution": False,
     }
     defaults.update(overrides)
     return ExecutionContext(**defaults)
 
 
 # ---------------------------------------------------------------------------
-# Safety gate
+# Isolation-first execution
 # ---------------------------------------------------------------------------
 
 
-def test_safety_gate_blocks_without_env():
-    """no ARIADNE_ENABLE_EXTERNAL_EXECUTION → blocked"""
+def _init_repo(repo):
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), capture_output=True, check=True)
+    (repo / "file.txt").write_text("hello")
+    subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), capture_output=True, check=True)
+
+
+_WRITE_AGENT_FILE = 'from pathlib import Path; Path("agent.txt").write_text("changed")'
+
+
+class WriteBackend(_ShellBackend):
+    name = "write"
+    template_env_var = "ARIADNE_WRITE_COMMAND_TEMPLATE"
+    default_template = (
+        f"{shlex.quote(sys.executable)} -c "
+        f"{shlex.quote(_WRITE_AGENT_FILE)}"
+    )
+    executable_name = sys.executable
+
+    def is_available(self) -> bool:
+        return True
+
+
+def test_git_repo_executes_in_worktree_without_env_or_confirmation(tmp_path):
+    """git repo defaults to isolated worktree execution with no confirmation gate."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("ARIADNE_ENABLE_EXTERNAL_EXECUTION", None)
-        backend = CodexBackend()
-        result = backend.execute(_make_context())
-        assert not result.success
-        assert "ARIADNE_ENABLE_EXTERNAL_EXECUTION" in result.stderr
+        result = WriteBackend().execute(_make_context(target_repo_path=str(repo)))
+
+    assert result.success is True
+    assert result.execution_repo_path != str(repo)
+    assert (repo / "agent.txt").exists() is False
+    assert "agent.txt" in result.changed_files
+    assert result.metadata["worktree_audit"]["worktree_created"] is True
 
 
-def test_safety_gate_blocks_without_confirm():
-    """no confirm_execution → blocked"""
-    with patch.dict(os.environ, {"ARIADNE_ENABLE_EXTERNAL_EXECUTION": "1"}):
-        backend = CodexBackend()
-        result = backend.execute(_make_context(confirm_execution=False))
-        assert not result.success
-        assert "confirm-execution" in result.stderr
+def test_non_git_directory_requires_write_workspace(tmp_path):
+    """non-git targets cannot run real commands unless write-workspace is explicit."""
+    result = WriteBackend().execute(_make_context(target_repo_path=str(tmp_path)))
+
+    assert result.success is False
+    assert "--write-workspace" in result.stderr
+    assert (tmp_path / "agent.txt").exists() is False
 
 
-def test_safety_gate_blocks_with_only_env():
-    """env set but no confirm → blocked"""
-    with patch.dict(os.environ, {"ARIADNE_ENABLE_EXTERNAL_EXECUTION": "1"}):
-        backend = CodexBackend()
-        result = backend.execute(_make_context(confirm_execution=False))
-        assert not result.success
+def test_write_workspace_allows_non_git_directory_execution(tmp_path):
+    """confirm_execution=True is now the explicit write-workspace escape hatch."""
+    result = WriteBackend().execute(
+        _make_context(target_repo_path=str(tmp_path), confirm_execution=True)
+    )
+
+    assert result.success is True
+    assert result.execution_repo_path == str(tmp_path)
+    assert (tmp_path / "agent.txt").read_text() == "changed"
+    assert result.metadata["worktree_audit"]["worktree_created"] is False
+
+
+def test_worktree_creation_failure_does_not_fallback_to_target_repo(tmp_path):
+    """failed isolation is a hard stop unless write-workspace is explicit."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    original_run = subprocess.run
+
+    def fail_worktree_add(args, *pargs, **kwargs):
+        if args[:3] == ["git", "worktree", "add"]:
+            raise subprocess.CalledProcessError(1, args, stderr="boom")
+        return original_run(args, *pargs, **kwargs)
+
+    with patch("ariadne.backends.subprocess.run", side_effect=fail_worktree_add):
+        result = WriteBackend().execute(_make_context(target_repo_path=str(repo)))
+
+    assert result.success is False
+    assert "worktree isolation failed" in result.stderr
+    assert (repo / "agent.txt").exists() is False
 
 
 def test_shell_backend_timeout_applies_before_stdout_eof(tmp_path):
@@ -84,13 +139,13 @@ def test_shell_backend_timeout_applies_before_stdout_eof(tmp_path):
         def is_available(self) -> bool:
             return True
 
-    with patch.dict(os.environ, {"ARIADNE_ENABLE_EXTERNAL_EXECUTION": "1"}):
-        result = SleepBackend().execute(
-            _make_context(
-                target_repo_path=str(tmp_path),
-                timeout_seconds=1,
-            )
+    result = SleepBackend().execute(
+        _make_context(
+            target_repo_path=str(tmp_path),
+            timeout_seconds=1,
+            confirm_execution=True,
         )
+    )
 
     assert result.success is False
     assert result.failure_reason == FailureReason.TIMEOUT

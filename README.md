@@ -106,7 +106,7 @@ See [docs/architecture/multica-mapping.md](docs/architecture/multica-mapping.md)
 1. **SQLite over JSON/JSONL** — durable state transitions need transactional integrity (atomic claim), but we don't need a server.
 2. **Structured delegation, not @mention** — `DelegationDecision` Pydantic model is testable, replayable, validates against roster. Multica's `@mention` markdown is not.
 3. **LLM injected, not hardcoded** — orchestrator receives a `llm_decide` callable. Tests use `deterministic_decide` without LLM calls.
-4. **Safety gate is non-negotiable** — dual confirmation (`ARIADNE_ENABLE_EXTERNAL_EXECUTION=1` + `confirm_execution=True`) before any real CLI execution.
+4. **Execution isolation is non-negotiable** — real CLI execution defaults to a detached git worktree; direct target writes require `--write-workspace`.
 5. **LangGraph skipped for v1** — single LLM call per leader activation is simpler than a supervisor graph. Documented in backlog.
 
 ## Testing
@@ -119,7 +119,7 @@ uv run pytest tests/ -v
 The suite covers state transitions, atomic claim, TaskRun compatibility,
 runtime registration, leases, IssueTimeline, AgentProfiles, Skills,
 LeaderDecisions, ExecutionPolicy, BenchmarkRuns, squad orchestration, backend
-safety gates, backend registry extension, session resume, MCP config injection,
+isolation gates, backend registry extension, session resume, MCP config injection,
 skill verification evidence, and the clean-checkout demo.
 
 ## Benchmark Evidence
@@ -142,11 +142,10 @@ uv run python benchmarks/runners/aggregate.py --artifact-dir artifacts
 Dry-run, synthetic real-backend smoke, live Codex/Claude backend runs, LLM
 routing, local pytest/ruff, and GitHub CI are reported as separate accounts.
 CI pass rate is only reportable from GitHub reported checks; local pytest is
-not a substitute for CI. Live Codex/Claude patch success requires explicit
-external execution and is not mixed with dry-run or synthetic smoke results.
-`ariadne benchmark-compare` follows the same rule: dry-run comparisons report
-`simulated: true`; real backend comparisons report `blocked` until
-`ARIADNE_ENABLE_EXTERNAL_EXECUTION=1` is set and the provider CLI is available.
+not a substitute for CI. Live Codex/Claude patch success requires the provider
+CLI and is not mixed with dry-run or synthetic smoke results. Real backend
+patch smoke runs default to isolated git worktrees; direct target writes require
+`--write-workspace`.
 
 ## Project Structure
 

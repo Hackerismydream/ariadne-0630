@@ -423,6 +423,14 @@ def test_cli_issue_create(cli_runner, tmp_path, monkeypatch):
     assert "CLI Test Issue" in result.stdout
 
 
+def test_cli_daemon_start_exposes_write_workspace_instead_of_confirm(cli_runner):
+    result = cli_runner.invoke(app, ["daemon-start", "--help"])
+
+    assert result.exit_code == 0
+    assert "--write-workspace" in result.stdout
+    assert "--confirm-execution" not in result.stdout
+
+
 def test_cli_daemon_start_max_iterations(cli_runner, tmp_path, monkeypatch):
     """daemon start --max-iterations 1 → runs once and exits"""
     db = str(tmp_path / "cli_daemon.db")

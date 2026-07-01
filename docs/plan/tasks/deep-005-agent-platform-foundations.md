@@ -40,9 +40,22 @@ authors exist.
 `ariadne benchmark-compare` compares serial and bounded-parallel execution.
 
 Dry-run mode injects deterministic latency and reports `simulated: true`.
-Real backend mode reports `blocked` unless `ARIADNE_ENABLE_EXTERNAL_EXECUTION=1`
-is set. This prevents dry-run acceleration from being presented as real Codex or
-Claude Code performance.
+Real backend mode runs the requested backend against a temporary workspace and
+reports provider availability or execution failure as first-class results. This
+prevents dry-run acceleration from being presented as real Codex or Claude Code
+performance.
+
+### Isolation-first real backend execution
+
+Codex, Claude Code, and synthetic subprocess backends now default to detached
+git worktree execution. Non-git targets and intentional direct writes require
+the explicit `--write-workspace` CLI flag, which maps to the legacy internal
+`ExecutionContext.confirm_execution` compatibility field.
+
+Worktree creation failure is a hard stop: the backend does not silently fall
+back to the target repository. Execution results include `worktree_audit`
+metadata with the target path, execution path, isolation mode, and patch capture
+status.
 
 ### Resume and MCP execution inputs
 

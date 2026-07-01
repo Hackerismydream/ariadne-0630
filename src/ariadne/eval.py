@@ -456,8 +456,8 @@ def run_single_vs_squad(
     """Compare serial and bounded-parallel execution with explicit evidence labels.
 
     Dry-run mode injects deterministic latency and is reported as simulated.
-    Real backend mode uses the requested backend and refuses to run unless the
-    normal external execution gate is enabled.
+    Real backend mode uses the requested backend against a temporary workspace;
+    backend isolation policy decides whether the subprocess may run.
     """
     from ariadne.backends import get_backend
 
@@ -465,30 +465,6 @@ def run_single_vs_squad(
     task_count = max(1, num_member_tasks)
     concurrency = max(1, min(max_concurrent or min(task_count, os.cpu_count() or 4), task_count))
     simulated = backend == "dry-run"
-    external_enabled = os.environ.get("ARIADNE_ENABLE_EXTERNAL_EXECUTION") == "1"
-    if not simulated and not external_enabled:
-        return {
-            "backend": backend,
-            "max_concurrent": concurrency,
-            "simulated": False,
-            "status": "blocked",
-            "blocked_reason": "ARIADNE_ENABLE_EXTERNAL_EXECUTION must be 1 for real backend comparison",
-            "single": {
-                "mode": "single",
-                "total_duration": 0.0,
-                "task_count": task_count,
-                "parallelism": 1,
-                "success": False,
-            },
-            "squad": {
-                "mode": "squad",
-                "total_duration": 0.0,
-                "task_count": task_count,
-                "parallelism": concurrency,
-                "success": False,
-            },
-            "speedup": 0.0,
-        }
 
     backend_impl = get_backend(backend)
     target_repo = tempfile.mkdtemp(prefix="ariadne-compare-")

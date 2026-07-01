@@ -22,7 +22,7 @@ tests/test_real_squad.py     # new (uses mock backend, not real CLI)
 
 ## Requirements
 
-1. `cli.py`: `ariadne squad-run --target-repo <path> --confirm-execution`
+1. `cli.py`: `ariadne squad-run --target-repo <path>` with optional `--write-workspace`
    - Creates leader + 2 members (coder/codex, tester/claude-code)
    - Creates squad + issue
    - Enqueues leader task

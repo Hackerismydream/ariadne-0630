@@ -18,8 +18,9 @@ prints the inspection commands. It creates:
 - TaskRuns, RuntimeLeases, IssueTimeline events, and LeaderDecisions.
 - A BenchmarkRun whose metrics are computed from product facts.
 
-No live provider is used. Real execution is skipped unless a separate command
-sets `ARIADNE_ENABLE_EXTERNAL_EXECUTION=1` and uses `--confirm-execution`.
+No live provider is used. Real provider execution is a separate path: git
+targets run in isolated worktrees by default, and direct target writes require
+`--write-workspace`.
 
 ## Verify
 

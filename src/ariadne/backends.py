@@ -1,6 +1,6 @@
 """Execution backend protocol, DryRunBackend, CodexBackend, ClaudeBackend.
 
-Real backends spawn coding-agent CLIs as subprocesses with safety gates,
+Real backends spawn coding-agent CLIs as subprocesses with isolation gates,
 command template rendering, diff capture, and timeout handling.
 
 Protocol per docs/architecture/harness-backend.md.
@@ -260,18 +260,6 @@ class _ShellBackend:
     ) -> ExecutionResult:
         started = time.monotonic()
 
-        # Safety gate: dual confirmation
-        if os.environ.get("ARIADNE_ENABLE_EXTERNAL_EXECUTION") != "1":
-            return _blocked_result(
-                context, self.name,
-                "External execution blocked: ARIADNE_ENABLE_EXTERNAL_EXECUTION must be 1.",
-            )
-        if not context.confirm_execution:
-            return _blocked_result(
-                context, self.name,
-                "External execution blocked: --confirm-execution is required.",
-            )
-
         # Check CLI availability
         if not self.is_available():
             return _blocked_result(
@@ -279,7 +267,8 @@ class _ShellBackend:
                 f"External execution blocked: `{self.executable_name}` command is unavailable.",
             )
 
-        # Worktree isolation: if target_repo is a git repo, create a worktree
+        # Isolation-first execution: write the target workspace only when the
+        # caller explicitly opts into that escape hatch.
         exec_path = context.target_repo_path
         worktree_path = None
         worktree_parent = None
@@ -287,11 +276,19 @@ class _ShellBackend:
             "target_repo_path": context.target_repo_path,
             "execution_repo_path": context.target_repo_path,
             "worktree_created": False,
+            "write_workspace": context.confirm_execution,
+            "isolation_required": not context.confirm_execution,
             "original_repo_clean_after": None,
             "patch_captured_before_cleanup": False,
         }
-        if _is_git_repo(context.target_repo_path):
-            trace = context.trace_id or context.task_id
+        if not context.confirm_execution and not _is_git_repo(context.target_repo_path):
+            return _blocked_result(
+                context,
+                self.name,
+                "External execution blocked: non-git target requires --write-workspace.",
+            )
+        if not context.confirm_execution:
+            trace = re.sub(r"[^A-Za-z0-9._-]+", "-", context.trace_id or context.task_id)
             worktree_parent = tempfile.mkdtemp(prefix="ariadne-worktrees-")
             worktree_path = os.path.join(worktree_parent, trace)
             try:
@@ -308,11 +305,26 @@ class _ShellBackend:
                         "worktree_created": True,
                     }
                 )
-            except Exception:
+            except subprocess.CalledProcessError as exc:
+                error = (exc.stderr or exc.stdout or str(exc)).strip()
+                worktree_audit["worktree_error"] = error
+                if worktree_parent:
+                    shutil.rmtree(worktree_parent, ignore_errors=True)
+                return _blocked_result(
+                    context,
+                    self.name,
+                    f"worktree isolation failed: {error}",
+                )
+            except Exception as exc:
+                worktree_audit["worktree_error"] = str(exc)
                 worktree_path = None
                 if worktree_parent:
                     shutil.rmtree(worktree_parent, ignore_errors=True)
-                    worktree_parent = None
+                return _blocked_result(
+                    context,
+                    self.name,
+                    f"worktree isolation failed: {exc}",
+                )
 
         # Write handoff to temp file
         handoff_file = tempfile.NamedTemporaryFile(

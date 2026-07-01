@@ -28,7 +28,9 @@ Expected flow:
 ### CLI: squad run
 
 ```bash
-ariadne squad-run --target-repo /path/to/repo --confirm-execution
+ariadne squad-run --target-repo /path/to/repo
+# Direct target writes, only when intentionally bypassing worktree isolation:
+ariadne squad-run --target-repo /path/to/repo --write-workspace
 ```
 
 Creates the squad, issue, leader task, and runs the daemon with orchestrator.

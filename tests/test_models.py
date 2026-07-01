@@ -410,12 +410,18 @@ def test_progress_update_round_trip():
         step=2,
         total=4,
         timestamp=_now(),
+        message_type="tool_use",
+        tool_name="pytest",
+        content="running tests",
     )
     data = update.model_dump_json()
     restored = ProgressUpdate.model_validate_json(data)
     assert restored == update
     # timestamp survives ISO round-trip
     assert restored.timestamp == update.timestamp
+    assert restored.message_type == "tool_use"
+    assert restored.tool_name == "pytest"
+    assert restored.content == "running tests"
 
 
 def test_datetime_serializes_iso():

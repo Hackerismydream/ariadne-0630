@@ -462,3 +462,6 @@ class ProgressUpdate(BaseModel):
     step: int
     total: int
     timestamp: datetime
+    message_type: str | None = None
+    tool_name: str | None = None
+    content: str | None = None

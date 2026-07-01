@@ -8,6 +8,7 @@ Protocol per docs/architecture/harness-backend.md.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -27,6 +28,61 @@ from ariadne.models import (
     FailureReason,
     ProgressUpdate,
 )
+
+
+def _stringify_progress_content(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True)
+
+
+def _progress_update_from_stdout_line(
+    context: ExecutionContext,
+    line: str,
+) -> ProgressUpdate:
+    stripped = line.strip()
+    message_type: str | None = None
+    tool_name: str | None = None
+    content: str | None = stripped or None
+    summary = stripped[:200]
+
+    if stripped:
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            message_type = _stringify_progress_content(
+                payload.get("message_type", payload.get("type"))
+            )
+            tool_name = _stringify_progress_content(
+                payload.get("tool_name", payload.get("name"))
+            )
+            content = _stringify_progress_content(
+                payload.get(
+                    "content",
+                    payload.get("text", payload.get("message", payload.get("result"))),
+                )
+            )
+            if content:
+                summary = content.strip()[:200]
+            else:
+                summary = " ".join(
+                    part for part in (message_type, tool_name) if part
+                )[:200]
+
+    return ProgressUpdate(
+        task_id=context.task_id,
+        summary=summary,
+        step=0,
+        total=0,
+        timestamp=datetime.now(timezone.utc),
+        message_type=message_type,
+        tool_name=tool_name,
+        content=content,
+    )
 
 # ---------------------------------------------------------------------------
 # Protocol
@@ -378,12 +434,9 @@ class _ShellBackend:
                     for line in proc.stdout:
                         stdout_lines.append(line)
                         if on_progress:
-                            on_progress(ProgressUpdate(
-                                task_id=context.task_id,
-                                summary=line.strip()[:200],
-                                step=0, total=0,
-                                timestamp=datetime.now(timezone.utc),
-                            ))
+                            on_progress(
+                                _progress_update_from_stdout_line(context, line)
+                            )
 
                 def read_stderr() -> None:
                     if proc.stderr is None:

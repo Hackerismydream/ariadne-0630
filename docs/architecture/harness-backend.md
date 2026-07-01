@@ -196,10 +196,16 @@ class ProgressUpdate(BaseModel):
     step: int             # current step
     total: int            # total steps (estimated)
     timestamp: datetime
+    message_type: str | None = None
+    tool_name: str | None = None
+    content: str | None = None
 ```
 
 Backends call `on_progress(ProgressUpdate(...))` during execution. The daemon
-layer persists these to IssueTimeline as `progress_reported` events.
+layer persists these to IssueTimeline as `progress_reported` events. Stdout
+lines that are JSON objects fill `message_type`, `tool_name`, and `content`
+when those keys are available; plain text lines use the stripped line as
+`summary` and `content`.
 
 ## Backend Registry
 

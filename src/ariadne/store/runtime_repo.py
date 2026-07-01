@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from ariadne.models import (
@@ -173,6 +174,16 @@ class RuntimeRepo:
             ).fetchall()
         return [self.row_to(RuntimeCapability, r) for r in rows]
 
+    def select_available_runtime_capability_rows(
+        self, runtime_machine_id: str
+    ) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            """SELECT * FROM runtime_capability
+               WHERE runtime_machine_id = ? AND status = 'available'
+               ORDER BY provider""",
+            (runtime_machine_id,),
+        ).fetchall()
+
     def get_runtime_capability(self, capability_id: str) -> RuntimeCapability | None:
         row = self._conn.execute(
             "SELECT * FROM runtime_capability WHERE id = ?", (capability_id,)
@@ -230,6 +241,53 @@ class RuntimeRepo:
                 (taskrun_id,),
             ).fetchall()
         return [self.row_to(RuntimeLease, r) for r in rows]
+
+    def count_active_runtime_leases(self, runtime_machine_id: str) -> int:
+        return self._conn.execute(
+            """SELECT COUNT(*) FROM runtime_lease
+               WHERE runtime_machine_id = ? AND status = 'active'""",
+            (runtime_machine_id,),
+        ).fetchone()[0]
+
+    def insert_runtime_lease(
+        self,
+        lease_id: str,
+        taskrun_id: str,
+        runtime_machine_id: str,
+        runtime_capability_id: str,
+        lease_token: str,
+        acquired_at: str,
+        expires_at: str,
+    ) -> None:
+        self._conn.execute(
+            """INSERT INTO runtime_lease
+               (id, taskrun_id, runtime_machine_id, runtime_capability_id,
+                status, lease_token, acquired_at, last_heartbeat_at,
+                expires_at, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                lease_id,
+                taskrun_id,
+                runtime_machine_id,
+                runtime_capability_id,
+                RuntimeLeaseStatus.ACTIVE.value,
+                lease_token,
+                acquired_at,
+                acquired_at,
+                expires_at,
+                "{}",
+            ),
+        )
+
+    def mark_runtime_lease_revoked(
+        self, lease_id: str, released_at: str, reason: str
+    ) -> None:
+        self._conn.execute(
+            """UPDATE runtime_lease
+               SET status = 'revoked', released_at = ?, revoke_reason = ?
+               WHERE id = ?""",
+            (released_at, reason, lease_id),
+        )
 
     def heartbeat_runtime_lease(
         self, lease_id: str, lease_seconds: int = 60

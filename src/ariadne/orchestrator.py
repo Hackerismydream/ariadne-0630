@@ -237,9 +237,9 @@ class Orchestrator:
                 # Issue already done — no need to re-activate leader
                 return
 
-            leader_task = self.store.enqueue_task(
+            leader_task = self.store.enqueue_taskrun(
                 issue_id=task.issue_id,
-                agent_id=squad.leader_id,
+                agent_profile_id=squad.leader_id,
                 squad_id=task.squad_id,
                 trace_id=task.trace_id,
             )

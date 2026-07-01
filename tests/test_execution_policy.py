@@ -1,5 +1,6 @@
 """Layered ExecutionPolicy gate tests."""
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -188,3 +189,62 @@ def test_taskrun_policy_blocks_real_execution_without_environment_grant(store, t
     assert failed.failure_reason == FailureReason.POLICY_BLOCKED
     assert backend.calls == 0
     assert _policy_event(store, issue.id).payload["layer"] == "taskrun"
+
+
+def test_store_migrates_legacy_task_constraints(tmp_path):
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE issue (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'backlog'
+                CHECK (status IN ('backlog', 'todo', 'in_progress', 'done', 'cancelled')),
+            assignee_type TEXT NOT NULL CHECK (assignee_type IN ('agent', 'squad')),
+            assignee_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE task (
+            id TEXT PRIMARY KEY,
+            issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL,
+            squad_id TEXT,
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK (status IN ('queued', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
+            attempt INTEGER NOT NULL DEFAULT 1,
+            max_attempts INTEGER NOT NULL DEFAULT 2,
+            parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
+            failure_reason TEXT
+                CHECK (failure_reason IS NULL OR failure_reason IN
+                       ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery', 'manual')),
+            dispatched_at TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            result TEXT,
+            error TEXT,
+            runtime_id TEXT,
+            handoff_prompt TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = Store(str(db))
+    try:
+        table_sql = migrated._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'task'"
+        ).fetchone()["sql"]
+        cols = [
+            row[1]
+            for row in migrated._conn.execute("PRAGMA table_info(task)").fetchall()
+        ]
+
+        assert "preparing" in table_sql
+        assert "policy_blocked" in table_sql
+        assert "trace_id" in cols
+    finally:
+        migrated.close()

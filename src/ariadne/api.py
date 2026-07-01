@@ -6,6 +6,7 @@ Per docs/architecture/dashboard-layout.md.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -16,11 +17,11 @@ from ariadne.store import Store
 
 app = FastAPI(title="Ariadne Dashboard")
 
-_db_path = "ariadne.db"
+_db_path = os.environ.get("ARIADNE_DB", "ariadne.db")
 
 
 def _get_store() -> Store:
-    return Store(_db_path)
+    return Store(os.environ.get("ARIADNE_DB", _db_path))
 
 
 class AgentProfileCreateRequest(BaseModel):

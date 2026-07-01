@@ -128,6 +128,7 @@ def test_event_loop_re_activates_leader(store, squad_setup):
     ).fetchall()
     # The original leader_task is still queued + event loop enqueues another
     assert len(leader_queued) >= 1
+    assert any(task["id"].startswith("taskrun-") for task in leader_queued)
 
 
 def test_event_loop_waits_for_pending(store, squad_setup):

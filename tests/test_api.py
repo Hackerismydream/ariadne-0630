@@ -89,3 +89,20 @@ def test_list_agents(client):
     assert len(data) >= 1
     assert data[0]["name"] == "TestAgent"
     assert data[0]["backends"] == ["dry-run"]
+
+
+def test_api_uses_ariadne_db_environment(tmp_path, monkeypatch):
+    """ARIADNE_DB selects the dashboard database."""
+    db = str(tmp_path / "env.db")
+    monkeypatch.setenv("ARIADNE_DB", db)
+    s = Store(db)
+    try:
+        agent = s.create_agent("EnvAgent", "", ["dry-run"], [])
+        s.create_issue("Env Issue", "", AssigneeType.AGENT, agent.id)
+    finally:
+        s.close()
+
+    res = TestClient(app).get("/api/issues")
+
+    assert res.status_code == 200
+    assert res.json()[0]["title"] == "Env Issue"

@@ -192,6 +192,7 @@ CREATE TABLE IF NOT EXISTS task (
     error TEXT,
     runtime_id TEXT,
     handoff_prompt TEXT,
+    trace_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -314,7 +315,7 @@ class Store:
         import threading
         self._lock = threading.Lock()
 
-        # Migration: add handoff_prompt column if not present
+        self._migrate_task_table_if_needed()
         cols = [r[1] for r in self._conn.execute("PRAGMA table_info(task)").fetchall()]
         if "handoff_prompt" not in cols:
             self._conn.execute("ALTER TABLE task ADD COLUMN handoff_prompt TEXT")
@@ -329,6 +330,88 @@ class Store:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _migrate_task_table_if_needed(self) -> None:
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'task'"
+        ).fetchone()
+        if row is None:
+            return
+        table_sql = row["sql"] or ""
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(task)").fetchall()]
+        needs_rebuild = (
+            "preparing" not in table_sql
+            or "policy_blocked" not in table_sql
+            or "trace_id" not in cols
+        )
+        if not needs_rebuild:
+            return
+
+        select_exprs = []
+        for column in (
+            "id",
+            "issue_id",
+            "agent_id",
+            "squad_id",
+            "status",
+            "attempt",
+            "max_attempts",
+            "parent_task_id",
+            "failure_reason",
+            "dispatched_at",
+            "started_at",
+            "completed_at",
+            "result",
+            "error",
+            "runtime_id",
+            "handoff_prompt",
+            "trace_id",
+            "created_at",
+        ):
+            select_exprs.append(column if column in cols else f"NULL AS {column}")
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        self._conn.execute("DROP INDEX IF EXISTS idx_task_claim")
+        self._conn.execute(
+            """CREATE TABLE task_new (
+                id TEXT PRIMARY KEY,
+                issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                squad_id TEXT,
+                status TEXT NOT NULL DEFAULT 'queued'
+                    CHECK (status IN ('queued', 'preparing', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
+                attempt INTEGER NOT NULL DEFAULT 1,
+                max_attempts INTEGER NOT NULL DEFAULT 2,
+                parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
+                failure_reason TEXT
+                    CHECK (failure_reason IS NULL OR failure_reason IN
+                           ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery', 'manual', 'policy_blocked')),
+                dispatched_at TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                result TEXT,
+                error TEXT,
+                runtime_id TEXT,
+                handoff_prompt TEXT,
+                trace_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"""
+        )
+        self._conn.execute(
+            f"""INSERT INTO task_new
+               (id, issue_id, agent_id, squad_id, status, attempt, max_attempts,
+                parent_task_id, failure_reason, dispatched_at, started_at,
+                completed_at, result, error, runtime_id, handoff_prompt,
+                trace_id, created_at)
+               SELECT {", ".join(select_exprs)} FROM task"""
+        )
+        self._conn.execute("DROP TABLE task")
+        self._conn.execute("ALTER TABLE task_new RENAME TO task")
+        self._conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_task_claim
+               ON task(status, created_at) WHERE status = 'queued'"""
+        )
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.commit()
 
     @staticmethod
     def _row_to_task(row: sqlite3.Row) -> Task:

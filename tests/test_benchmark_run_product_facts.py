@@ -84,6 +84,32 @@ def test_benchmark_report_separates_failure_classes(tmp_path):
         store.close()
 
 
+def test_benchmark_can_repeat_same_case_name(tmp_path):
+    store = Store(str(tmp_path / "test.db"))
+    try:
+        tasks = [
+            BenchmarkTask(
+                title="Repeat Case",
+                description="same title twice",
+                backend="dry-run",
+                expected_success=True,
+            ),
+            BenchmarkTask(
+                title="Repeat Case",
+                description="same title twice",
+                backend="dry-run",
+                expected_success=True,
+            ),
+        ]
+        report = run_benchmark(store, tasks)
+
+        assert report.total_tasks == 2
+        assert report.success_count == 2
+        assert len(store.list_benchmark_runs()) == 2
+    finally:
+        store.close()
+
+
 def test_benchmark_run_cli_api_and_dashboard_surfaces(tmp_path, monkeypatch):
     db = str(tmp_path / "test.db")
     monkeypatch.setattr("ariadne.cli._db_path", db)

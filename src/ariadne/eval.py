@@ -201,7 +201,7 @@ def _default_execute(store: Store, bt: BenchmarkTask) -> dict:
         runtime_policy=bt.runtime_policy,
     )
     skill = store.create_skill(
-        name=f"benchmark-{slug}",
+        name=f"benchmark-{slug}-{len(store.list_skills()) + 1}",
         description="Benchmark case skill",
         when_to_use=bt.description,
         prompt_snippet="Execute the benchmark case and report observable facts.",

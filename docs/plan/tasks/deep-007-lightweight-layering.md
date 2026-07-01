@@ -4,7 +4,7 @@
 
 代码审查发现 `store.py` 已达 2093 行，是一个 God Object：一个文件塞了 13 个实体（runtime_machine/capability/lease、task/taskrun、issue、skill、agent_profile、squad、benchmark_run、leader_decision、timeline）的全部 CRUD + 状态机业务逻辑，含 49 处重复的 `_row_to_*` 转换样板。
 
-**明确不上完整 DDD**（用户决策）。理由：`models.py` 只有 6 个方法，是贫血 Pydantic 数据类；领域逻辑是过程式的状态机转移/claim/租约，不匹配充血对象；7000 行的个人项目套完整 DDD（聚合根/领域事件/值对象/防腐层）是过度工程，面试反效果——**知道何时不上某模式比会用更显成熟**。
+**方向：朝 DDD 演进，克制落地**（用户决策，见 CLAUDE.md「架构方向」）。目标是 DDD 架构，用它的积木——Repository、Domain Service、充血实体、聚合根、限界上下文——但**每个积木要挣得存在的理由**，拒绝过度仪式（无差别值对象、领域事件总线、CQRS、防腐层，无真实需求就不加）。缰绳是「优雅、简单易懂」：代码读起来像业务叙述，不像框架样板。本任务是这条演进路径的第一步：先立 Repository + Domain Service，实体按需从贫血转向必要的充血。
 
 **采用轻量两层分层**：
 - **Repository 层**：纯持久化，一个实体一个 repo，消灭 God Object 和重复样板。
@@ -129,11 +129,11 @@ def claim_for_runtime(self, runtime_machine_id, lease_seconds=60) -> TaskRunClai
 
 - **repo = 纯持久化**：只有 SQL + row↔model。无状态机、无业务判断、无跨实体规则。
 - **service = 业务规则**：状态转移合法性、重试策略、并发/串行约束、失败分类。跨 repo 的事务在 service 编排。
-- **贫血模型保持贫血**：models.py 不加行为，Pydantic 数据类就好。**不引入聚合根/领域事件/值对象**——那是 DDD，本任务明确不做。
+- **实体按需充血**：只属于某实体的规则可以搬进 models.py 的实体（充血）；跨实体规则归 Domain Service。**不为仪式引入值对象/领域事件**——有真实需求再加，加前问「解决什么真问题」。
 - **facade 保对外兼容**：`Store` 门面存活，调用方无感。
 
 ## 明确不做
-- 不上完整 DDD（聚合根、领域事件、值对象、防腐层、CQRS）。
+- 不引入 DDD 的过度仪式（无差别值对象、领域事件总线、CQRS、防腐层）——有真实需求再加。
 - 不拆 cli.py/eval.py/api.py（本轮只拆 store 的 God Object + 建 service 层；其他大文件收益递减，另议）。
 - 不改任何运行时行为——纯结构重构。
 

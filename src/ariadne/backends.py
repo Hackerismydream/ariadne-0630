@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +53,7 @@ class ExecutionBackend(Protocol):
 
 _SUPPORTED_PLACEHOLDERS = {
     "target_repo",
+    "execution_repo",
     "handoff_file",
     "task_id",
     "model",
@@ -61,10 +64,17 @@ _SUPPORTED_PLACEHOLDERS = {
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 
 
-def render_command(template: str, context: ExecutionContext, handoff_file: str) -> str:
+def render_command(
+    template: str,
+    context: ExecutionContext,
+    handoff_file: str,
+    execution_repo_path: str | None = None,
+) -> str:
     """Render a command template. Fail fast on unknown placeholder."""
+    repo_path = execution_repo_path or context.target_repo_path
     values = {
-        "target_repo": shlex.quote(context.target_repo_path),
+        "target_repo": shlex.quote(repo_path),
+        "execution_repo": shlex.quote(repo_path),
         "handoff_file": shlex.quote(handoff_file),
         "task_id": shlex.quote(context.task_id),
         "model": shlex.quote(context.model or ""),
@@ -147,6 +157,8 @@ def _blocked_result(
         failure_reason=FailureReason.AGENT_ERROR,
         duration_seconds=0.0,
         command=command,
+        command_cwd=context.target_repo_path,
+        execution_repo_path=context.target_repo_path,
     )
 
 
@@ -189,6 +201,8 @@ class DryRunBackend:
             failure_reason=None,
             duration_seconds=0.0,
             command="dry-run (no command)",
+            command_cwd=context.target_repo_path,
+            execution_repo_path=context.target_repo_path,
         )
 
 
@@ -249,20 +263,37 @@ class _ShellBackend:
         # Worktree isolation: if target_repo is a git repo, create a worktree
         exec_path = context.target_repo_path
         worktree_path = None
+        worktree_parent = None
+        worktree_audit: dict = {
+            "target_repo_path": context.target_repo_path,
+            "execution_repo_path": context.target_repo_path,
+            "worktree_created": False,
+            "original_repo_clean_after": None,
+            "patch_captured_before_cleanup": False,
+        }
         if _is_git_repo(context.target_repo_path):
             trace = context.trace_id or context.task_id
-            worktree_path = os.path.join(
-                context.target_repo_path, ".ariadne-worktrees", trace
-            )
+            worktree_parent = tempfile.mkdtemp(prefix="ariadne-worktrees-")
+            worktree_path = os.path.join(worktree_parent, trace)
             try:
                 subprocess.run(
-                    ["git", "worktree", "add", worktree_path, "-b", f"ariadne/{trace}"],
+                    ["git", "worktree", "add", "--detach", worktree_path, "HEAD"],
                     cwd=context.target_repo_path,
                     capture_output=True, text=True, timeout=10,
+                    check=True,
                 )
                 exec_path = worktree_path
+                worktree_audit.update(
+                    {
+                        "execution_repo_path": exec_path,
+                        "worktree_created": True,
+                    }
+                )
             except Exception:
                 worktree_path = None
+                if worktree_parent:
+                    shutil.rmtree(worktree_parent, ignore_errors=True)
+                    worktree_parent = None
 
         # Write handoff to temp file
         handoff_file = tempfile.NamedTemporaryFile(
@@ -272,11 +303,25 @@ class _ShellBackend:
         handoff_file.close()
 
         command = ""
+        diff: str | None = None
+        changed_files: list[str] = []
+        test_exit_code: int | None = None
+        test_stdout: str | None = None
+        test_stderr: str | None = None
+        test_duration: float | None = None
+        test_passed: bool | None = None
         try:
             try:
-                command = render_command(self._command_template(), context, handoff_file.name)
+                command = render_command(
+                    self._command_template(),
+                    context,
+                    handoff_file.name,
+                    execution_repo_path=exec_path,
+                )
             except ValueError as e:
                 return _blocked_result(context, self.name, f"command template error: {e}")
+            worktree_audit["rendered_command"] = command
+            worktree_audit["command_cwd"] = exec_path
 
             if on_progress:
                 on_progress(ProgressUpdate(
@@ -291,9 +336,14 @@ class _ShellBackend:
                 proc = subprocess.Popen(
                     command, cwd=exec_path, shell=True,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    start_new_session=True,
                 )
-                stdout_lines = []
-                try:
+                stdout_lines: list[str] = []
+                stderr_lines: list[str] = []
+
+                def read_stdout() -> None:
+                    if proc.stdout is None:
+                        return
                     for line in proc.stdout:
                         stdout_lines.append(line)
                         if on_progress:
@@ -303,19 +353,46 @@ class _ShellBackend:
                                 step=0, total=0,
                                 timestamp=datetime.now(timezone.utc),
                             ))
-                    proc.wait(timeout=context.timeout_seconds)
-                    exit_code = proc.returncode
+
+                def read_stderr() -> None:
+                    if proc.stderr is None:
+                        return
+                    for line in proc.stderr:
+                        stderr_lines.append(line)
+
+                stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+                stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+                stdout_thread.start()
+                stderr_thread.start()
+                try:
+                    wait_result = proc.wait(timeout=context.timeout_seconds)
+                    exit_code = proc.returncode if proc.returncode is not None else wait_result
+                    stdout_thread.join(timeout=1)
+                    stderr_thread.join(timeout=1)
                     stdout = "".join(stdout_lines)
-                    stderr = proc.stderr.read() if proc.stderr else ""
+                    stderr = "".join(stderr_lines)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except Exception:
+                        proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    stdout_thread.join(timeout=1)
+                    stderr_thread.join(timeout=1)
                     duration = time.monotonic() - started
                     return ExecutionResult(
                         backend_name=self.name, success=False, exit_code=-1,
-                        stdout="", stderr=f"execution timed out after {context.timeout_seconds}s",
+                        stdout="".join(stdout_lines),
+                        stderr=f"execution timed out after {context.timeout_seconds}s",
                         diff=None, changed_files=[],
                         failure_reason=FailureReason.TIMEOUT,
                         duration_seconds=duration, command=command,
+                        command_cwd=exec_path,
+                        execution_repo_path=exec_path,
+                        metadata={"worktree_audit": worktree_audit},
                     )
             except OSError as e:
                 return _blocked_result(context, self.name, f"failed to spawn process: {e}")
@@ -325,8 +402,31 @@ class _ShellBackend:
             # Parse structured output (ClaudeBackend overrides parse_output)
             parsed_stdout, metadata = self.parse_output(stdout)
 
-            # Capture diff from execution path
+            # Capture diff from execution path before optional cleanup.
             diff, changed_files = _capture_diff(exec_path)
+            worktree_audit["patch_captured_before_cleanup"] = True
+
+            if context.test_command:
+                test_started = time.monotonic()
+                try:
+                    test_proc = subprocess.run(
+                        context.test_command,
+                        cwd=exec_path,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=context.test_timeout_seconds,
+                    )
+                    test_exit_code = test_proc.returncode
+                    test_stdout = test_proc.stdout
+                    test_stderr = test_proc.stderr
+                    test_passed = test_exit_code == 0
+                except subprocess.TimeoutExpired as exc:
+                    test_exit_code = -1
+                    test_stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+                    test_stderr = f"test command timed out after {context.test_timeout_seconds}s"
+                    test_passed = False
+                test_duration = time.monotonic() - test_started
 
             if on_progress:
                 on_progress(ProgressUpdate(
@@ -336,13 +436,47 @@ class _ShellBackend:
                     timestamp=datetime.now(timezone.utc),
                 ))
 
-            success = exit_code == 0
+            success = exit_code == 0 and test_passed is not False
+            metadata = metadata or {}
+            if worktree_path:
+                try:
+                    original_status = subprocess.run(
+                        ["git", "status", "--porcelain"],
+                        cwd=context.target_repo_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    worktree_audit["original_repo_clean_after"] = (
+                        original_status.returncode == 0
+                        and original_status.stdout.strip() == ""
+                    )
+                except Exception:
+                    worktree_audit["original_repo_clean_after"] = None
+            metadata["worktree_audit"] = worktree_audit
+            session_id = metadata.get("session_id") if isinstance(metadata, dict) else None
+            failure_reason = None
+            if not success:
+                failure_reason = (
+                    FailureReason.TEST_FAILURE
+                    if exit_code == 0 and test_passed is False
+                    else FailureReason.PROVIDER_ERROR
+                )
             return ExecutionResult(
                 backend_name=self.name, success=success, exit_code=exit_code,
                 stdout=parsed_stdout, stderr=stderr,
                 diff=diff, changed_files=changed_files,
-                failure_reason=None if success else FailureReason.AGENT_ERROR,
+                failure_reason=failure_reason,
                 duration_seconds=duration, command=command, metadata=metadata,
+                command_cwd=exec_path,
+                execution_repo_path=exec_path,
+                test_command=context.test_command,
+                test_exit_code=test_exit_code,
+                test_stdout=test_stdout,
+                test_stderr=test_stderr,
+                test_duration_seconds=test_duration,
+                test_passed=test_passed,
+                session_id=session_id,
             )
         finally:
             try:
@@ -356,14 +490,10 @@ class _ShellBackend:
                         cwd=context.target_repo_path,
                         capture_output=True, text=True, timeout=10,
                     )
-                    trace = context.trace_id or context.task_id
-                    subprocess.run(
-                        ["git", "branch", "-D", f"ariadne/{trace}"],
-                        cwd=context.target_repo_path,
-                        capture_output=True, text=True, timeout=10,
-                    )
                 except Exception:
                     pass
+            if worktree_parent:
+                shutil.rmtree(worktree_parent, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

@@ -184,7 +184,9 @@ CREATE TABLE IF NOT EXISTS task (
     parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
     failure_reason TEXT
         CHECK (failure_reason IS NULL OR failure_reason IN
-               ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery', 'manual', 'policy_blocked')),
+               ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery',
+                'manual', 'policy_blocked', 'provider_error', 'test_failure',
+                'routing_failure', 'llm_parse_failure')),
     dispatched_at TEXT,
     started_at TEXT,
     completed_at TEXT,
@@ -343,6 +345,7 @@ class Store:
             "preparing" not in table_sql
             or "policy_blocked" not in table_sql
             or "trace_id" not in cols
+            or "test_failure" not in table_sql
         )
         if not needs_rebuild:
             return
@@ -384,7 +387,10 @@ class Store:
                 parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
                 failure_reason TEXT
                     CHECK (failure_reason IS NULL OR failure_reason IN
-                           ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery', 'manual', 'policy_blocked')),
+                           ('agent_error', 'timeout', 'runtime_offline',
+                            'runtime_recovery', 'manual', 'policy_blocked',
+                            'provider_error', 'test_failure', 'routing_failure',
+                            'llm_parse_failure')),
                 dispatched_at TEXT,
                 started_at TEXT,
                 completed_at TEXT,

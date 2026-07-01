@@ -4,7 +4,9 @@ Per docs/plan/tasks/backend-001.md "test_backends.py must cover".
 """
 
 import os
+import shlex
 import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -13,12 +15,13 @@ from ariadne.backends import (
     CodexBackend,
     ClaudeBackend,
     DryRunBackend,
+    _ShellBackend,
     _capture_diff,
 
     get_backend,
     render_command,
 )
-from ariadne.models import ExecutionContext
+from ariadne.models import ExecutionContext, FailureReason
 
 
 def _make_context(**overrides) -> ExecutionContext:
@@ -68,6 +71,32 @@ def test_safety_gate_blocks_with_only_env():
         assert not result.success
 
 
+def test_shell_backend_timeout_applies_before_stdout_eof(tmp_path):
+    """no-output long-running commands are killed by timeout_seconds."""
+
+    class SleepBackend(_ShellBackend):
+        name = "sleep"
+        template_env_var = "ARIADNE_SLEEP_COMMAND_TEMPLATE"
+        default_template = f"{shlex.quote(sys.executable)} -c \"import time; time.sleep(5)\""
+        executable_name = sys.executable
+
+        def is_available(self) -> bool:
+            return True
+
+    with patch.dict(os.environ, {"ARIADNE_ENABLE_EXTERNAL_EXECUTION": "1"}):
+        result = SleepBackend().execute(
+            _make_context(
+                target_repo_path=str(tmp_path),
+                timeout_seconds=1,
+            )
+        )
+
+    assert result.success is False
+    assert result.failure_reason == FailureReason.TIMEOUT
+    assert "timed out" in result.stderr
+    assert result.duration_seconds < 3
+
+
 # ---------------------------------------------------------------------------
 # Command template rendering
 # ---------------------------------------------------------------------------
@@ -85,6 +114,19 @@ def test_command_template_rendering():
     assert "gpt-4" in rendered
     assert "high" in rendered
     assert "do things" in rendered
+
+
+def test_command_template_uses_execution_repo_when_provided():
+    """{target_repo} and {execution_repo} point at the isolated execution path."""
+    context = _make_context()
+    rendered = render_command(
+        "{target_repo} {execution_repo}",
+        context,
+        "/tmp/handoff.md",
+        execution_repo_path="/tmp/worktree",
+    )
+    assert "/tmp/worktree /tmp/worktree" == rendered
+    assert "/tmp/test-repo" not in rendered
 
 
 def test_unknown_placeholder_raises():

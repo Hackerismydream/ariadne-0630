@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Prepare artifact directories
+        run: mkdir -p artifacts/quality artifacts/benchmarks
+      - name: Ruff
+        run: uv run ruff check src tests | tee artifacts/quality/ruff.log
+      - name: Pytest
+        run: uv run pytest tests/ --junitxml artifacts/quality/pytest.xml
+      - name: Benchmark artifact spine smoke
+        run: |
+          uv run python benchmarks/runners/artifact_spine.py \
+            --artifact-dir artifacts/benchmarks/artifact-spine
+      - name: Benchmark control-plane smoke
+        run: |
+          uv run python benchmarks/runners/control_plane_concurrency.py \
+            --tasks 20 \
+            --workers 4 \
+            --artifact-dir artifacts/benchmarks/control-plane
+      - name: Benchmark state-machine smoke
+        run: |
+          uv run python benchmarks/runners/state_machine_recovery.py \
+            --artifact-dir artifacts/benchmarks/state-machine
+      - name: Aggregate benchmark smoke
+        run: |
+          uv run python benchmarks/runners/aggregate.py \
+            --artifact-dir artifacts
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ariadne-ci-artifacts
+          path: artifacts/

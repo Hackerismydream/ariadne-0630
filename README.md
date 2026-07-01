@@ -116,6 +116,29 @@ runtime registration, leases, IssueTimeline, AgentProfiles, Skills,
 LeaderDecisions, ExecutionPolicy, BenchmarkRuns, squad orchestration, backend
 safety gates, and the clean-checkout demo.
 
+## Benchmark Evidence
+
+Ariadne benchmark numbers are generated from artifact-backed runners rather
+than terminal-only output. Each runner writes a run directory with metadata,
+case manifest, metrics, exported SQLite product facts, summaries, and artifact
+hashes.
+
+```bash
+uv run python benchmarks/runners/artifact_spine.py --artifact-dir artifacts/benchmarks/artifact
+uv run python benchmarks/runners/control_plane_concurrency.py --tasks 500 --workers 16 --artifact-dir artifacts/benchmarks/control
+uv run python benchmarks/runners/state_machine_recovery.py --artifact-dir artifacts/benchmarks/state
+uv run python benchmarks/runners/squad_routing.py --artifact-dir artifacts/benchmarks/squad
+uv run python benchmarks/runners/trace_replay.py --artifact-dir artifacts/benchmarks/trace
+uv run python benchmarks/runners/real_backend_patch.py --provider synthetic --artifact-dir artifacts/benchmarks/real
+uv run python benchmarks/runners/aggregate.py --artifact-dir artifacts
+```
+
+Dry-run, synthetic real-backend smoke, live Codex/Claude backend runs, LLM
+routing, local pytest/ruff, and GitHub CI are reported as separate accounts.
+CI pass rate is only reportable from GitHub reported checks; local pytest is
+not a substitute for CI. Live Codex/Claude patch success requires explicit
+external execution and is not mixed with dry-run or synthetic smoke results.
+
 ## Project Structure
 
 ```
@@ -129,8 +152,10 @@ src/ariadne/
 ├── backends.py        # Codex/Claude/DryRun + safety gate + diff
 ├── policy.py          # Layered ExecutionPolicy gate
 ├── eval.py            # BenchmarkRun from product facts + evaluation
+├── benchmarking.py    # Artifact-backed benchmark runners + aggregate reports
 └── cli.py             # Typer CLI entry point
-tests/                 # 112 tests
+benchmarks/runners/    # External benchmark runner entry points
+tests/                 # Test suite
 docs/                  # Architecture docs + delivery plan
 ```
 

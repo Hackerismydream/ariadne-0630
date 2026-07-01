@@ -52,6 +52,10 @@ class FailureReason(str, Enum):
     RUNTIME_RECOVERY = "runtime_recovery"
     MANUAL = "manual"
     POLICY_BLOCKED = "policy_blocked"
+    PROVIDER_ERROR = "provider_error"
+    TEST_FAILURE = "test_failure"
+    ROUTING_FAILURE = "routing_failure"
+    LLM_PARSE_FAILURE = "llm_parse_failure"
 
 
 class AssigneeType(str, Enum):
@@ -394,6 +398,8 @@ class ExecutionContext(BaseModel):
     model: str | None = None
     effort: str | None = None
     trace_id: str | None = None
+    test_command: str | None = None
+    test_timeout_seconds: int = 120
 
 
 class ExecutionPolicyDecision(BaseModel):
@@ -435,6 +441,15 @@ class ExecutionResult(BaseModel):
     duration_seconds: float
     command: str
     metadata: dict | None = None
+    command_cwd: str | None = None
+    execution_repo_path: str | None = None
+    test_command: str | None = None
+    test_exit_code: int | None = None
+    test_stdout: str | None = None
+    test_stderr: str | None = None
+    test_duration_seconds: float | None = None
+    test_passed: bool | None = None
+    session_id: str | None = None
 
 
 class ProgressUpdate(BaseModel):

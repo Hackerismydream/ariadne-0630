@@ -6,11 +6,11 @@ Per docs/plan/tasks/eval-001.md "test_eval.py must cover".
 import pytest
 
 from ariadne.eval import (
-
     BenchmarkTask,
     evaluate_task,
     report_to_dict,
     run_benchmark,
+    run_single_vs_squad,
 )
 from ariadne.models import AssigneeType, FailureReason
 from ariadne.store import Store
@@ -147,3 +147,45 @@ def test_report_to_dict(store):
     assert "success_rate" in d
     assert "avg_score" in d
     assert d["total_tasks"] == 1
+
+
+def test_single_vs_squad_compare_labels_dry_run_as_simulated(store):
+    """dry-run comparison reports simulated evidence and bounded parallelism."""
+    result = run_single_vs_squad(
+        store,
+        num_member_tasks=4,
+        task_duration=0.001,
+        backend="dry-run",
+        max_concurrent=2,
+    )
+
+    assert result["backend"] == "dry-run"
+    assert result["simulated"] is True
+    assert result["status"] == "completed"
+    assert result["max_concurrent"] == 2
+    assert result["single"]["parallelism"] == 1
+    assert result["single"]["task_count"] == 4
+    assert result["squad"]["parallelism"] == 2
+    assert result["squad"]["task_count"] == 4
+    assert result["single"]["success"] is True
+    assert result["squad"]["success"] is True
+
+
+def test_single_vs_squad_compare_blocks_real_backend_without_gate(store, monkeypatch):
+    """real backend comparison is truthful when external execution is disabled."""
+    monkeypatch.delenv("ARIADNE_ENABLE_EXTERNAL_EXECUTION", raising=False)
+
+    result = run_single_vs_squad(
+        store,
+        num_member_tasks=2,
+        backend="codex",
+        max_concurrent=4,
+    )
+
+    assert result["backend"] == "codex"
+    assert result["simulated"] is False
+    assert result["status"] == "blocked"
+    assert result["max_concurrent"] == 2
+    assert "ARIADNE_ENABLE_EXTERNAL_EXECUTION" in result["blocked_reason"]
+    assert result["single"]["success"] is False
+    assert result["squad"]["success"] is False

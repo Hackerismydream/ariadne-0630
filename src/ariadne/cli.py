@@ -565,6 +565,34 @@ def benchmark_run(
     store.close()
 
 
+@app.command(name="benchmark-compare")
+def benchmark_compare(
+    num_tasks: int = typer.Option(3, "--tasks", "-n", help="Number of tasks per mode"),
+    backend: str = typer.Option("dry-run", "--backend", "-b"),
+    max_concurrent: int | None = typer.Option(None, "--max-concurrent"),
+    task_duration: float = typer.Option(
+        0.1,
+        "--task-duration",
+        help="Simulated per-task delay used only by dry-run comparison",
+    ),
+):
+    """Compare serial vs bounded-parallel backend execution with truth labels."""
+    import json
+
+    from ariadne.eval import run_single_vs_squad
+
+    store = _get_store()
+    result = run_single_vs_squad(
+        store,
+        num_member_tasks=num_tasks,
+        task_duration=task_duration,
+        backend=backend,
+        max_concurrent=max_concurrent,
+    )
+    typer.echo(json.dumps(result, indent=2))
+    store.close()
+
+
 @app.command()
 def benchmark_list():
     """List persisted BenchmarkRuns."""

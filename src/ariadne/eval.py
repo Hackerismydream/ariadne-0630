@@ -11,11 +11,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from ariadne.models import FailureReason, IssueStatus, TaskStatus
+from ariadne.models import ExecutionContext, FailureReason, IssueStatus, TaskStatus
 from ariadne.store import Store
 
 logger = logging.getLogger(__name__)
@@ -441,6 +444,105 @@ def report_to_dict(report: BenchmarkReport) -> dict:
         "benchmark_run_ids": report.benchmark_run_ids,
         "tasks": report.tasks,
     }
+
+
+def run_single_vs_squad(
+    store: Store,
+    num_member_tasks: int = 3,
+    task_duration: float = 0.1,
+    backend: str = "dry-run",
+    max_concurrent: int | None = None,
+) -> dict:
+    """Compare serial and bounded-parallel execution with explicit evidence labels.
+
+    Dry-run mode injects deterministic latency and is reported as simulated.
+    Real backend mode uses the requested backend and refuses to run unless the
+    normal external execution gate is enabled.
+    """
+    from ariadne.backends import get_backend
+
+    del store
+    task_count = max(1, num_member_tasks)
+    concurrency = max(1, min(max_concurrent or min(task_count, os.cpu_count() or 4), task_count))
+    simulated = backend == "dry-run"
+    external_enabled = os.environ.get("ARIADNE_ENABLE_EXTERNAL_EXECUTION") == "1"
+    if not simulated and not external_enabled:
+        return {
+            "backend": backend,
+            "max_concurrent": concurrency,
+            "simulated": False,
+            "status": "blocked",
+            "blocked_reason": "ARIADNE_ENABLE_EXTERNAL_EXECUTION must be 1 for real backend comparison",
+            "single": {
+                "mode": "single",
+                "total_duration": 0.0,
+                "task_count": task_count,
+                "parallelism": 1,
+                "success": False,
+            },
+            "squad": {
+                "mode": "squad",
+                "total_duration": 0.0,
+                "task_count": task_count,
+                "parallelism": concurrency,
+                "success": False,
+            },
+            "speedup": 0.0,
+        }
+
+    backend_impl = get_backend(backend)
+    target_repo = tempfile.mkdtemp(prefix="ariadne-compare-")
+    try:
+        def execute_one(index: int):
+            if simulated:
+                time.sleep(task_duration)
+            context = ExecutionContext(
+                task_id=f"compare-{backend}-{index}",
+                agent_name="BenchmarkAgent",
+                agent_instructions="Run the comparison task and report facts.",
+                handoff_prompt=f"Comparison sub-task {index}",
+                target_repo_path=target_repo,
+                skill_refs=[],
+                confirm_execution=True,
+                trace_id=f"compare-{index}",
+            )
+            return backend_impl.execute(context)
+
+        single_started = time.monotonic()
+        single_results = [execute_one(index) for index in range(task_count)]
+        single_duration = time.monotonic() - single_started
+
+        squad_started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            squad_results = list(executor.map(execute_one, range(task_count)))
+        squad_duration = time.monotonic() - squad_started
+
+        single_success = all(result.success for result in single_results)
+        squad_success = all(result.success for result in squad_results)
+        speedup = single_duration / squad_duration if squad_duration > 0 else 0.0
+        return {
+            "backend": backend,
+            "max_concurrent": concurrency,
+            "simulated": simulated,
+            "status": "completed" if single_success and squad_success else "failed",
+            "single": {
+                "mode": "single",
+                "total_duration": round(single_duration, 4),
+                "task_count": task_count,
+                "parallelism": 1,
+                "success": single_success,
+            },
+            "squad": {
+                "mode": "squad",
+                "total_duration": round(squad_duration, 4),
+                "task_count": task_count,
+                "parallelism": concurrency,
+                "success": squad_success,
+            },
+            "speedup": round(speedup, 2),
+        }
+    finally:
+        shutil.rmtree(target_repo, ignore_errors=True)
 
 
 def _slug(value: str) -> str:

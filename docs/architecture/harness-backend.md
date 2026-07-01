@@ -36,7 +36,7 @@ a callback during execution.
 
 ```python
 class ExecutionBackend(Protocol):
-    name: str  # "codex" | "claude-code"
+    name: str  # "codex" | "claude-code" | "dry-run" | extension name
 
     def is_available(self) -> bool: ...
     def execute(self, context: ExecutionContext,
@@ -58,6 +58,11 @@ class ExecutionContext(BaseModel):
     confirm_execution: bool = False
     model: str | None = None
     effort: str | None = None     # reasoning effort override
+    trace_id: str | None = None
+    test_command: str | None = None
+    test_timeout_seconds: int = 120
+    resume_session_id: str | None = None
+    mcp_config_path: str | None = None
 ```
 
 ## ExecutionResult
@@ -71,11 +76,24 @@ class ExecutionResult(BaseModel):
     stderr: str
     diff: str | None              # git diff after execution
     changed_files: list[str]
-    test_result: str | None       # test output if available
     failure_reason: FailureReason | None
     duration_seconds: float
     command: str                  # redacted command for logging
+    metadata: dict | None = None
+    command_cwd: str | None = None
+    execution_repo_path: str | None = None
+    test_command: str | None = None
+    test_exit_code: int | None = None
+    test_stdout: str | None = None
+    test_stderr: str | None = None
+    test_duration_seconds: float | None = None
+    test_passed: bool | None = None
+    session_id: str | None = None
 ```
+
+`session_id` is a first-class resume handle. Backends may also return it inside
+`metadata`; `_ShellBackend` copies `metadata["session_id"]` into the field when
+available.
 
 ## Backends
 
@@ -85,6 +103,8 @@ class ExecutionResult(BaseModel):
 
 ```
 Command template: codex exec --cd {target_repo} - < {handoff_file}
+Optional fragments:
+  --mcp-config {mcp_config}       (only when mcp_config_path is set)
 Env vars:
   ARIADNE_CODEX_COMMAND_TEMPLATE  (override)
   ARIADNE_CODEX_MODEL             (model override)
@@ -97,6 +117,9 @@ Env vars:
 
 ```
 Command template: claude --print --output-format json < {handoff_file}
+Optional fragments:
+  --resume {resume_session_id}    (only when resume_session_id is set)
+  --mcp-config {mcp_config}       (only when mcp_config_path is set)
 Env vars:
   ARIADNE_CLAUDE_COMMAND_TEMPLATE  (override)
   ARIADNE_CLAUDE_MODEL             (model override)
@@ -123,11 +146,17 @@ matches multica's gated execution approach.
 
 ```python
 SUPPORTED_PLACEHOLDERS = {
-    "target_repo", "handoff_file", "ticket_id", "task_id",
-    "model", "effort", "system_prompt", "system_prompt_file",
+    "target_repo", "execution_repo", "handoff_file", "task_id",
+    "model", "effort", "system_prompt", "resume_session_id",
+    "mcp_config",
 }
 
-def render_command(template: str, context: ExecutionContext) -> str:
+def render_command(
+    template: str,
+    context: ExecutionContext,
+    handoff_file: str,
+    execution_repo_path: str | None = None,
+) -> str:
     """Render command template. Fail fast on unknown placeholder."""
     # ...
 ```
@@ -148,21 +177,30 @@ class ProgressUpdate(BaseModel):
 ```
 
 Backends call `on_progress(ProgressUpdate(...))` during execution. The daemon
-layer persists these to `run_message` table and emits to API/WebSocket if active.
+layer persists these to IssueTimeline as `progress_reported` events.
 
 ## Backend Registry
 
 ```python
-def get_backend(name: str) -> ExecutionBackend:
-    backends = {
-        "codex": CodexBackend(),
-        "claude-code": ClaudeBackend(),
-        "dry-run": DryRunBackend(),      # no-op, for testing
-    }
-    if name not in backends:
-        raise UnknownBackendError(name)
-    return backends[name]
+def register_backend(backend: ExecutionBackend) -> None: ...
+def get_backend(name: str) -> ExecutionBackend: ...
+def available_backends() -> list[str]: ...
 ```
+
+Built-ins are registered in-process at import time. The registry is intentionally
+not a third-party entry-point discovery mechanism yet; package discovery belongs
+to a later open-source productization phase after real external backend authors
+exist.
+
+## Session Resume and MCP Config
+
+The daemon fills `resume_session_id` from the latest completed TaskRun in the
+same retry chain or trace whose result contains `session_id` or
+`metadata.session_id`. Agent-profile `runtime_policy["mcp_config_path"]` wins
+over the process-level `ARIADNE_MCP_CONFIG` environment variable.
+
+Both fields are optional and render to provider-specific command fragments only
+when present, so dry-run and existing command templates keep their old behavior.
 
 ## Diff Capture
 
@@ -184,10 +222,12 @@ If repo is not a git repo → `diff=None, changed_files=[]`. No error, just abse
 | `test_safety_gate_blocks_without_env` | No `ARIADNE_ENABLE_EXTERNAL_EXECUTION` → blocked result |
 | `test_safety_gate_blocks_without_confirm` | No `confirm_execution` → blocked result |
 | `test_command_template_rendering` | All supported placeholders render correctly |
+| `test_provider_specific_resume_and_mcp_fragments` | Resume/MCP fragments are conditional |
 | `test_unknown_placeholder_fails` | Unknown placeholder → `ValueError` |
 | `test_diff_capture` | Git repo with changes → diff + changed_files populated |
 | `test_diff_capture_no_git` | Non-git directory → diff=None, no error |
-| `test_backend_registry` | Known names return backends, unknown → `UnknownBackendError` |
+| `test_backend_registry` | Known names return backends, unknown → `ValueError` |
+| `test_backend_registry_accepts_in_process_extensions` | Register/get/duplicate behavior for extension backends |
 | `test_dry_run_backend` | DryRunBackend returns success without subprocess |
 | `test_timeout_handling` | Execution exceeding timeout → `failure_reason=timeout` |
 | `test_progress_callback` | on_progress called during execution with valid ProgressUpdate |

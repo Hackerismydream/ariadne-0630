@@ -17,8 +17,9 @@ from ariadne.backends import (
     DryRunBackend,
     _ShellBackend,
     _capture_diff,
-
+    available_backends,
     get_backend,
+    register_backend,
     render_command,
 )
 from ariadne.models import ExecutionContext, FailureReason
@@ -104,9 +105,17 @@ def test_shell_backend_timeout_applies_before_stdout_eof(tmp_path):
 
 def test_command_template_rendering():
     """all supported placeholders render correctly"""
-    context = _make_context(model="gpt-4", effort="high")
+    context = _make_context(
+        model="gpt-4",
+        effort="high",
+        resume_session_id="session-123",
+        mcp_config_path="/tmp/mcp.json",
+    )
     # Use a template with all placeholders
-    template = "{target_repo} {handoff_file} {task_id} {model} {effort} {system_prompt}"
+    template = (
+        "{target_repo} {handoff_file} {task_id} {model} {effort} "
+        "{system_prompt} {resume_session_id} {mcp_config}"
+    )
     rendered = render_command(template, context, "/tmp/handoff.md")
     assert "/tmp/test-repo" in rendered
     assert "/tmp/handoff.md" in rendered
@@ -114,6 +123,8 @@ def test_command_template_rendering():
     assert "gpt-4" in rendered
     assert "high" in rendered
     assert "do things" in rendered
+    assert "session-123" in rendered
+    assert "/tmp/mcp.json" in rendered
 
 
 def test_command_template_uses_execution_repo_when_provided():
@@ -134,6 +145,27 @@ def test_unknown_placeholder_raises():
     context = _make_context()
     with pytest.raises(ValueError, match="unknown placeholder"):
         render_command("{foo} {target_repo}", context, "/tmp/h.md")
+
+
+def test_provider_specific_resume_and_mcp_fragments():
+    """provider templates add resume/MCP flags only when context supplies them."""
+    context = _make_context(
+        resume_session_id="session-123",
+        mcp_config_path="/tmp/mcp.json",
+    )
+
+    claude_template = ClaudeBackend()._render_template(context)
+    codex_template = CodexBackend()._render_template(context)
+
+    assert "--resume {resume_session_id}" in claude_template
+    assert "--mcp-config {mcp_config}" in claude_template
+    assert "--resume" not in codex_template
+    assert "--mcp-config {mcp_config}" in codex_template
+
+    empty_context = _make_context()
+    assert "--resume" not in ClaudeBackend()._render_template(empty_context)
+    assert "--mcp-config" not in ClaudeBackend()._render_template(empty_context)
+    assert "--mcp-config" not in CodexBackend()._render_template(empty_context)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +228,19 @@ def test_backend_registry():
     assert isinstance(get_backend("dry-run"), DryRunBackend)
     with pytest.raises(ValueError):
         get_backend("nonexistent")
+
+
+def test_backend_registry_accepts_in_process_extensions():
+    """local extensions can register a backend without editing the literal."""
+    class ExtensionBackend(DryRunBackend):
+        name = "extension-test-backend"
+
+    register_backend(ExtensionBackend())
+
+    assert "extension-test-backend" in available_backends()
+    assert get_backend("extension-test-backend").name == "extension-test-backend"
+    with pytest.raises(ValueError, match="already registered"):
+        register_backend(ExtensionBackend())
 
 
 def test_codex_is_available():

@@ -400,6 +400,8 @@ class ExecutionContext(BaseModel):
     trace_id: str | None = None
     test_command: str | None = None
     test_timeout_seconds: int = 120
+    resume_session_id: str | None = None
+    mcp_config_path: str | None = None
 
 
 class ExecutionPolicyDecision(BaseModel):

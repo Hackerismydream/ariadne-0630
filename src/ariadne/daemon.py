@@ -7,9 +7,11 @@ Synchronous loop — no threads, no asyncio. Sufficient for local single-user.
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import shutil
 import socket
+import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Callable
@@ -199,12 +201,13 @@ class Daemon:
             logger.warning("unknown backend '%s', falling back to dry-run", backend_name)
             backend = self.backend_factory("dry-run")
 
+        profile = self.store.get_agent_profile(task.agent_id)
         bound_skills = self.store.list_skills_for_agent_profile(task.agent_id)
         skill_refs = [skill.name for skill in bound_skills]
-        test_command = next(
-            (skill.test_command for skill in bound_skills if skill.test_command),
-            None,
-        )
+        mcp_config_path = None
+        if profile is not None:
+            mcp_config_path = profile.runtime_policy.get("mcp_config_path")
+        mcp_config_path = mcp_config_path or os.environ.get("ARIADNE_MCP_CONFIG")
 
         context = ExecutionContext(
             task_id=task.id,
@@ -215,7 +218,8 @@ class Daemon:
             skill_refs=skill_refs,
             confirm_execution=True,
             trace_id=task.trace_id,
-            test_command=test_command,
+            resume_session_id=self._resume_session_id_for_task(task),
+            mcp_config_path=mcp_config_path,
         )
 
         policy = evaluate_execution_policy(
@@ -268,7 +272,14 @@ class Daemon:
             return
 
         if result.success:
-            self.store.complete_task(task.id, _result_to_dict(result))
+            result_dict = _result_to_dict(result)
+            verifications = self._run_skill_verifications(task, result, bound_skills)
+            if verifications:
+                result_dict["skill_verifications"] = verifications
+                metadata = dict(result_dict.get("metadata") or {})
+                metadata["skill_verifications"] = verifications
+                result_dict["metadata"] = metadata
+            self.store.complete_task(task.id, result_dict)
             self._release_active_lease(task.id)
             if task.trace_id:
                 self.store.log_activity(task.trace_id, task.id, "completed", {"backend": result.backend_name})
@@ -293,6 +304,96 @@ class Daemon:
         lease = self.store.get_active_runtime_lease_for_taskrun(task_id)
         if lease is not None:
             self.store.release_runtime_lease(lease.id)
+
+    def _resume_session_id_for_task(self, task: Task) -> str | None:
+        """Find the latest provider session id for a retry or same-trace follow-up."""
+        candidates: list[Task] = []
+        if task.parent_task_id:
+            parent = self.store.get_task(task.parent_task_id)
+            if parent is not None:
+                candidates.append(parent)
+        if task.trace_id:
+            rows = self.store._conn.execute(
+                """SELECT * FROM task
+                   WHERE trace_id = ? AND id != ? AND result IS NOT NULL
+                   ORDER BY completed_at DESC, created_at DESC""",
+                (task.trace_id, task.id),
+            ).fetchall()
+            candidates.extend(self.store._row_to_task(row) for row in rows)
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate.id in seen:
+                continue
+            seen.add(candidate.id)
+            result = candidate.result or {}
+            session_id = result.get("session_id")
+            if not session_id:
+                metadata = result.get("metadata") or {}
+                session_id = metadata.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                return session_id
+        return None
+
+    def _run_skill_verifications(
+        self,
+        task: Task,
+        result: ExecutionResult,
+        skills,
+    ) -> list[dict]:
+        """Run skill verification commands as evidence, not a hard task gate."""
+        verifications = []
+        cwd = result.execution_repo_path or result.command_cwd or self.target_repo_path
+        for skill in skills:
+            if not skill.test_command:
+                continue
+            started = time.monotonic()
+            try:
+                proc = subprocess.run(
+                    skill.test_command,
+                    cwd=cwd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                passed = proc.returncode == 0
+                record = {
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "command": skill.test_command,
+                    "exit_code": proc.returncode,
+                    "stdout": proc.stdout,
+                    "stderr": proc.stderr,
+                    "duration_seconds": round(time.monotonic() - started, 4),
+                    "passed": passed,
+                }
+            except subprocess.TimeoutExpired as exc:
+                record = {
+                    "skill_id": skill.id,
+                    "skill_name": skill.name,
+                    "command": skill.test_command,
+                    "exit_code": -1,
+                    "stdout": exc.stdout if isinstance(exc.stdout, str) else "",
+                    "stderr": "verification command timed out after 120s",
+                    "duration_seconds": round(time.monotonic() - started, 4),
+                    "passed": False,
+                }
+            verifications.append(record)
+            event_type = "verification_passed" if record["passed"] else "verification_failed"
+            if task.trace_id:
+                self.store.log_activity(task.trace_id, task.id, event_type, record)
+            self.store.append_issue_timeline_event(
+                task.issue_id,
+                "tests_reported",
+                actor_type="runtime",
+                actor_id=self.runtime_id,
+                taskrun_id=task.id,
+                payload={
+                    "source": "skill_verification",
+                    **record,
+                },
+            )
+        return verifications
 
     def _maybe_retry(self, task: Task) -> None:
         """Retry if attempts remain."""

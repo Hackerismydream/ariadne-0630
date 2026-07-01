@@ -95,6 +95,15 @@ class AgentProfileStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class LeaderDecisionOutcome(str, Enum):
+    """Outcome of one squad leader activation."""
+
+    ACTION = "action"
+    NO_ACTION = "no_action"
+    FAILED = "failed"
+    DONE = "done"
+
+
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
@@ -324,6 +333,20 @@ class SquadBriefing(BaseModel):
     protocol: str
     roster: list[RosterEntry]
     instructions: str
+
+
+class LeaderDecision(BaseModel):
+    """Replayable product fact produced by one squad leader turn."""
+
+    outcome: LeaderDecisionOutcome
+    reason: str = ""
+    delegation_payload: dict = Field(default_factory=dict)
+    created_taskrun_ids: list[str] = Field(default_factory=list)
+    id: str | None = None
+    issue_id: str | None = None
+    squad_id: str | None = None
+    leader_task_id: str | None = None
+    created_at: datetime | None = None
 
 
 class DelegationDecision(BaseModel):

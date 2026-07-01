@@ -22,6 +22,8 @@ from ariadne.models import (
     Issue,
     IssueStatus,
     IssueTimelineEvent,
+    LeaderDecision,
+    LeaderDecisionOutcome,
     RuntimeCapability,
     RuntimeCapabilityStatus,
     RuntimeLease,
@@ -195,6 +197,22 @@ CREATE TABLE IF NOT EXISTS task (
 CREATE INDEX IF NOT EXISTS idx_task_claim
     ON task(status, created_at) WHERE status = 'queued';
 
+CREATE TABLE IF NOT EXISTS leader_decision (
+    id TEXT PRIMARY KEY,
+    issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+    squad_id TEXT NOT NULL REFERENCES squad(id) ON DELETE CASCADE,
+    leader_task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+    outcome TEXT NOT NULL
+        CHECK (outcome IN ('action', 'no_action', 'failed', 'done')),
+    reason TEXT NOT NULL DEFAULT '',
+    delegation_payload_json TEXT NOT NULL DEFAULT '{}',
+    created_taskrun_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_leader_decision_issue_time
+    ON leader_decision(issue_id, created_at);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id TEXT PRIMARY KEY,
     trace_id TEXT NOT NULL,
@@ -356,6 +374,20 @@ class Store:
             leader_decision_id=row["leader_decision_id"],
             comment_id=row["comment_id"],
             payload=json.loads(row["payload_json"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_leader_decision(row: sqlite3.Row) -> LeaderDecision:
+        return LeaderDecision(
+            id=row["id"],
+            issue_id=row["issue_id"],
+            squad_id=row["squad_id"],
+            leader_task_id=row["leader_task_id"],
+            outcome=LeaderDecisionOutcome(row["outcome"]),
+            reason=row["reason"],
+            delegation_payload=json.loads(row["delegation_payload_json"]),
+            created_taskrun_ids=json.loads(row["created_taskrun_ids_json"]),
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
@@ -960,6 +992,74 @@ class Store:
         ).fetchall()
         return [self._row_to_issue_timeline_event(r) for r in rows]
 
+    def record_leader_decision(
+        self,
+        issue_id: str,
+        squad_id: str,
+        leader_task_id: str,
+        outcome: LeaderDecisionOutcome,
+        reason: str = "",
+        delegation_payload: dict | None = None,
+        created_taskrun_ids: list[str] | None = None,
+    ) -> LeaderDecision:
+        decision_id = _new_id("leaderdecision")
+        created_at = _now_iso()
+        self._conn.execute(
+            """INSERT INTO leader_decision
+               (id, issue_id, squad_id, leader_task_id, outcome, reason,
+                delegation_payload_json, created_taskrun_ids_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                decision_id,
+                issue_id,
+                squad_id,
+                leader_task_id,
+                outcome.value,
+                reason,
+                json.dumps(delegation_payload or {}),
+                json.dumps(created_taskrun_ids or []),
+                created_at,
+            ),
+        )
+        self._conn.commit()
+        decision = self.get_leader_decision(decision_id)
+        if decision is None:
+            raise KeyError(f"leader decision not found: {decision_id}")
+        self.append_issue_timeline_event(
+            issue_id,
+            "leader_decided",
+            actor_type="leader",
+            taskrun_id=leader_task_id,
+            leader_decision_id=decision.id,
+            payload={
+                "outcome": outcome.value,
+                "reason": reason,
+                "delegation_payload": delegation_payload or {},
+                "created_taskrun_ids": created_taskrun_ids or [],
+            },
+        )
+        return decision
+
+    def get_leader_decision(self, decision_id: str) -> LeaderDecision | None:
+        row = self._conn.execute(
+            "SELECT * FROM leader_decision WHERE id = ?", (decision_id,)
+        ).fetchone()
+        return self._row_to_leader_decision(row) if row else None
+
+    def list_leader_decisions(self, issue_id: str | None = None) -> list[LeaderDecision]:
+        if issue_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM leader_decision ORDER BY created_at, id"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT * FROM leader_decision
+                   WHERE issue_id = ?
+                   ORDER BY created_at, id""",
+                (issue_id,),
+            ).fetchall()
+        return [self._row_to_leader_decision(r) for r in rows]
+
     def create_issue(
         self,
         title: str,
@@ -1369,7 +1469,7 @@ class Store:
         rows = self._conn.execute(
             """SELECT * FROM task
                WHERE squad_id = ?
-                 AND status IN ('queued', 'claimed', 'running')
+                 AND status IN ('queued', 'preparing', 'claimed', 'running')
                ORDER BY created_at""",
             (squad_id,),
         ).fetchall()

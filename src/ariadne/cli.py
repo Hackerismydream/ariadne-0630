@@ -26,6 +26,54 @@ def _get_store() -> Store:
 
 
 # ---------------------------------------------------------------------------
+# Runtime commands
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def runtime_list():
+    """List registered RuntimeMachines."""
+    store = _get_store()
+    machines = store.list_runtime_machines()
+    if not machines:
+        typer.echo("No runtime machines.")
+        store.close()
+        return
+    for machine in machines:
+        heartbeat = (
+            machine.last_heartbeat_at.isoformat()
+            if machine.last_heartbeat_at
+            else "never"
+        )
+        typer.echo(
+            f"  {machine.id}  [{machine.status.value}]  "
+            f"root={machine.workspace_root}  heartbeat={heartbeat}"
+        )
+    store.close()
+
+
+@app.command()
+def capability_list(
+    runtime_machine_id: str | None = typer.Option(None, "--runtime-machine-id"),
+):
+    """List RuntimeCapabilities."""
+    store = _get_store()
+    capabilities = store.list_runtime_capabilities(runtime_machine_id)
+    if not capabilities:
+        typer.echo("No runtime capabilities.")
+        store.close()
+        return
+    for capability in capabilities:
+        health = f"  error={capability.health_error}" if capability.health_error else ""
+        typer.echo(
+            f"  {capability.id}  {capability.provider}  "
+            f"[{capability.status.value}]  runtime={capability.runtime_machine_id}"
+            f"{health}"
+        )
+    store.close()
+
+
+# ---------------------------------------------------------------------------
 # Issue commands
 # ---------------------------------------------------------------------------
 

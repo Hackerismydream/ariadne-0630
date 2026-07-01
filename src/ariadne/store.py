@@ -19,6 +19,10 @@ from ariadne.models import (
     FailureReason,
     Issue,
     IssueStatus,
+    RuntimeCapability,
+    RuntimeCapabilityStatus,
+    RuntimeMachine,
+    RuntimeMachineStatus,
     Squad,
     SquadMember,
     Task,
@@ -75,6 +79,38 @@ def _new_id(prefix: str) -> str:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS runtime_machine (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('online', 'offline', 'draining', 'disabled')),
+    version TEXT NOT NULL DEFAULT '',
+    device_info TEXT NOT NULL DEFAULT '{}',
+    last_heartbeat_at TEXT,
+    max_concurrent_taskruns INTEGER NOT NULL DEFAULT 1,
+    workspace_root TEXT NOT NULL DEFAULT '',
+    repo_allowlist TEXT NOT NULL DEFAULT '[]',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runtime_capability (
+    id TEXT PRIMARY KEY,
+    runtime_machine_id TEXT NOT NULL REFERENCES runtime_machine(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    command_path TEXT NOT NULL DEFAULT '',
+    version TEXT NOT NULL DEFAULT '',
+    models_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL
+        CHECK (status IN ('available', 'unavailable', 'degraded', 'disabled')),
+    health_error TEXT,
+    default_args_json TEXT NOT NULL DEFAULT '[]',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    last_checked_at TEXT,
+    UNIQUE(runtime_machine_id, provider, command_path)
+);
+
 CREATE TABLE IF NOT EXISTS issue (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -226,6 +262,43 @@ class Store:
         )
 
     @staticmethod
+    def _row_to_runtime_machine(row: sqlite3.Row) -> RuntimeMachine:
+        return RuntimeMachine(
+            id=row["id"],
+            name=row["name"],
+            status=RuntimeMachineStatus(row["status"]),
+            version=row["version"],
+            device_info=json.loads(row["device_info"]),
+            last_heartbeat_at=datetime.fromisoformat(row["last_heartbeat_at"])
+            if row["last_heartbeat_at"]
+            else None,
+            max_concurrent_taskruns=row["max_concurrent_taskruns"],
+            workspace_root=row["workspace_root"],
+            repo_allowlist=json.loads(row["repo_allowlist"]),
+            metadata=json.loads(row["metadata"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_runtime_capability(row: sqlite3.Row) -> RuntimeCapability:
+        return RuntimeCapability(
+            id=row["id"],
+            runtime_machine_id=row["runtime_machine_id"],
+            provider=row["provider"],
+            command_path=row["command_path"],
+            version=row["version"],
+            models=json.loads(row["models_json"]),
+            status=RuntimeCapabilityStatus(row["status"]),
+            health_error=row["health_error"],
+            default_args=json.loads(row["default_args_json"]),
+            metadata=json.loads(row["metadata"]),
+            last_checked_at=datetime.fromisoformat(row["last_checked_at"])
+            if row["last_checked_at"]
+            else None,
+        )
+
+    @staticmethod
     def _row_to_agent(row: sqlite3.Row) -> Agent:
         return Agent(
             id=row["id"],
@@ -266,6 +339,179 @@ class Store:
     ) -> None:
         if (current, target) not in _LEGAL_TRANSITIONS:
             raise InvalidStateTransition(current.value, action)
+
+    # ------------------------------------------------------------------
+    # RuntimeMachine / RuntimeCapability
+    # ------------------------------------------------------------------
+
+    def register_runtime_machine(
+        self,
+        runtime_machine_id: str,
+        name: str,
+        version: str = "",
+        workspace_root: str = "",
+        max_concurrent_taskruns: int = 1,
+        repo_allowlist: list[str] | None = None,
+        device_info: dict | None = None,
+        metadata: dict | None = None,
+    ) -> RuntimeMachine:
+        now = _now_iso()
+        existing = self.get_runtime_machine(runtime_machine_id)
+        created_at = existing.created_at.isoformat() if existing else now
+        self._conn.execute(
+            """INSERT INTO runtime_machine
+               (id, name, status, version, device_info, last_heartbeat_at,
+                max_concurrent_taskruns, workspace_root, repo_allowlist,
+                metadata, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    status = excluded.status,
+                    version = excluded.version,
+                    device_info = excluded.device_info,
+                    max_concurrent_taskruns = excluded.max_concurrent_taskruns,
+                    workspace_root = excluded.workspace_root,
+                    repo_allowlist = excluded.repo_allowlist,
+                    metadata = excluded.metadata,
+                    updated_at = excluded.updated_at""",
+            (
+                runtime_machine_id,
+                name,
+                RuntimeMachineStatus.ONLINE.value,
+                version,
+                json.dumps(device_info or {}),
+                existing.last_heartbeat_at.isoformat()
+                if existing and existing.last_heartbeat_at
+                else None,
+                max_concurrent_taskruns,
+                workspace_root,
+                json.dumps(repo_allowlist or []),
+                json.dumps(metadata or {}),
+                created_at,
+                now,
+            ),
+        )
+        self._conn.commit()
+        machine = self.get_runtime_machine(runtime_machine_id)
+        if machine is None:
+            raise KeyError(f"runtime machine not found: {runtime_machine_id}")
+        return machine
+
+    def heartbeat_runtime_machine(self, runtime_machine_id: str) -> RuntimeMachine:
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE runtime_machine
+               SET status = ?, last_heartbeat_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (RuntimeMachineStatus.ONLINE.value, now, now, runtime_machine_id),
+        )
+        self._conn.commit()
+        machine = self.get_runtime_machine(runtime_machine_id)
+        if machine is None:
+            raise KeyError(f"runtime machine not found: {runtime_machine_id}")
+        return machine
+
+    def get_runtime_machine(self, runtime_machine_id: str) -> RuntimeMachine | None:
+        row = self._conn.execute(
+            "SELECT * FROM runtime_machine WHERE id = ?", (runtime_machine_id,)
+        ).fetchone()
+        return self._row_to_runtime_machine(row) if row else None
+
+    def list_runtime_machines(self) -> list[RuntimeMachine]:
+        rows = self._conn.execute(
+            "SELECT * FROM runtime_machine ORDER BY name"
+        ).fetchall()
+        return [self._row_to_runtime_machine(r) for r in rows]
+
+    def upsert_runtime_capability(
+        self,
+        runtime_machine_id: str,
+        provider: str,
+        command_path: str = "",
+        version: str = "",
+        status: RuntimeCapabilityStatus = RuntimeCapabilityStatus.UNAVAILABLE,
+        health_error: str | None = None,
+        models: list[str] | None = None,
+        default_args: list[str] | None = None,
+        metadata: dict | None = None,
+    ) -> RuntimeCapability:
+        now = _now_iso()
+        existing = self._conn.execute(
+            """SELECT * FROM runtime_capability
+               WHERE runtime_machine_id = ? AND provider = ? AND command_path = ?""",
+            (runtime_machine_id, provider, command_path),
+        ).fetchone()
+        capability_id = existing["id"] if existing else _new_id("cap")
+        self._conn.execute(
+            """INSERT INTO runtime_capability
+               (id, runtime_machine_id, provider, command_path, version,
+                models_json, status, health_error, default_args_json, metadata,
+                last_checked_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(runtime_machine_id, provider, command_path) DO UPDATE SET
+                    version = excluded.version,
+                    models_json = excluded.models_json,
+                    status = excluded.status,
+                    health_error = excluded.health_error,
+                    default_args_json = excluded.default_args_json,
+                    metadata = excluded.metadata,
+                    last_checked_at = excluded.last_checked_at""",
+            (
+                capability_id,
+                runtime_machine_id,
+                provider,
+                command_path,
+                version,
+                json.dumps(models or []),
+                status.value,
+                health_error,
+                json.dumps(default_args or []),
+                json.dumps(metadata or {}),
+                now,
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM runtime_capability WHERE id = ?", (capability_id,)
+        ).fetchone()
+        return self._row_to_runtime_capability(row)
+
+    def list_runtime_capabilities(
+        self, runtime_machine_id: str | None = None
+    ) -> list[RuntimeCapability]:
+        if runtime_machine_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM runtime_capability ORDER BY provider"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT * FROM runtime_capability
+                   WHERE runtime_machine_id = ?
+                   ORDER BY provider""",
+                (runtime_machine_id,),
+            ).fetchall()
+        return [self._row_to_runtime_capability(r) for r in rows]
+
+    def set_runtime_capability_status(
+        self,
+        capability_id: str,
+        status: RuntimeCapabilityStatus,
+        health_error: str | None = None,
+    ) -> RuntimeCapability:
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE runtime_capability
+               SET status = ?, health_error = ?, last_checked_at = ?
+               WHERE id = ?""",
+            (status.value, health_error, now, capability_id),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM runtime_capability WHERE id = ?", (capability_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"runtime capability not found: {capability_id}")
+        return self._row_to_runtime_capability(row)
 
     # ------------------------------------------------------------------
     # Issue

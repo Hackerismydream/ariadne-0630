@@ -13,7 +13,7 @@ Field definitions follow:
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +57,62 @@ class AssigneeType(str, Enum):
 
     AGENT = "agent"
     SQUAD = "squad"
+
+
+class RuntimeMachineStatus(str, Enum):
+    """Lifecycle state of a local execution host."""
+
+    ONLINE = "online"
+    OFFLINE = "offline"
+    DRAINING = "draining"
+    DISABLED = "disabled"
+
+
+class RuntimeCapabilityStatus(str, Enum):
+    """Health state of an executable coding-agent capability."""
+
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    DEGRADED = "degraded"
+    DISABLED = "disabled"
+
+
+# ---------------------------------------------------------------------------
+# Runtime
+# ---------------------------------------------------------------------------
+
+
+class RuntimeMachine(BaseModel):
+    """A durable execution host, usually one local daemon instance."""
+
+    id: str
+    name: str
+    status: RuntimeMachineStatus
+    version: str = ""
+    device_info: dict = Field(default_factory=dict)
+    last_heartbeat_at: datetime | None = None
+    max_concurrent_taskruns: int = 1
+    workspace_root: str = ""
+    repo_allowlist: list[str] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class RuntimeCapability(BaseModel):
+    """An executable coding-agent capability exposed by a RuntimeMachine."""
+
+    id: str
+    runtime_machine_id: str
+    provider: str
+    command_path: str = ""
+    version: str = ""
+    models: list[str] = Field(default_factory=list)
+    status: RuntimeCapabilityStatus
+    health_error: str | None = None
+    default_args: list[str] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
+    last_checked_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------

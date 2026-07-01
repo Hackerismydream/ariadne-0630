@@ -50,6 +50,59 @@ def list_issues():
     ]
 
 
+@app.get("/api/runtime-machines")
+def list_runtime_machines():
+    """List registered RuntimeMachines."""
+    store = _get_store()
+    machines = store.list_runtime_machines()
+    store.close()
+    return [
+        {
+            "id": m.id,
+            "name": m.name,
+            "status": m.status.value,
+            "version": m.version,
+            "device_info": m.device_info,
+            "last_heartbeat_at": m.last_heartbeat_at.isoformat()
+            if m.last_heartbeat_at
+            else None,
+            "max_concurrent_taskruns": m.max_concurrent_taskruns,
+            "workspace_root": m.workspace_root,
+            "repo_allowlist": m.repo_allowlist,
+            "metadata": m.metadata,
+            "created_at": m.created_at.isoformat(),
+            "updated_at": m.updated_at.isoformat(),
+        }
+        for m in machines
+    ]
+
+
+@app.get("/api/runtime-capabilities")
+def list_runtime_capabilities():
+    """List RuntimeCapabilities."""
+    store = _get_store()
+    capabilities = store.list_runtime_capabilities()
+    store.close()
+    return [
+        {
+            "id": c.id,
+            "runtime_machine_id": c.runtime_machine_id,
+            "provider": c.provider,
+            "command_path": c.command_path,
+            "version": c.version,
+            "models": c.models,
+            "status": c.status.value,
+            "health_error": c.health_error,
+            "default_args": c.default_args,
+            "metadata": c.metadata,
+            "last_checked_at": c.last_checked_at.isoformat()
+            if c.last_checked_at
+            else None,
+        }
+        for c in capabilities
+    ]
+
+
 @app.get("/api/tasks")
 def list_tasks():
     """List all tasks with trace_id."""

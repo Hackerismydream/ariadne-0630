@@ -7,16 +7,20 @@ Synchronous loop — no threads, no asyncio. Sufficient for local single-user.
 from __future__ import annotations
 
 import logging
+import platform
+import shutil
+import socket
 import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from ariadne.backends import ExecutionBackend
+from ariadne.backends import ExecutionBackend, available_backends
 from ariadne.models import (
     ExecutionContext,
     ExecutionResult,
     FailureReason,
     ProgressUpdate,
+    RuntimeCapabilityStatus,
     Task,
 )
 from ariadne.store import MaxAttemptsExhausted, Store
@@ -48,12 +52,14 @@ class Daemon:
         self.target_repo_path = target_repo_path
         self._running = False
         self._last_heartbeat: datetime | None = None
+        self._runtime_registered = False
 
     def start(self, max_iterations: int | None = None) -> None:
         """Run the poll loop. Stops on KeyboardInterrupt or max_iterations."""
         self._running = True
         iterations = 0
         try:
+            self._register_runtime()
             while self._running:
                 self._recover_stale_claims()
                 self._send_heartbeat()
@@ -76,6 +82,52 @@ class Daemon:
 
     def stop(self) -> None:
         self._running = False
+
+    def _register_runtime(self) -> None:
+        """Register this daemon as a RuntimeMachine and probe capabilities."""
+        self.store.register_runtime_machine(
+            runtime_machine_id=self.runtime_id,
+            name=f"{socket.gethostname()}:{self.runtime_id}",
+            version="0.1.0",
+            workspace_root=self.target_repo_path,
+            max_concurrent_taskruns=1,
+            repo_allowlist=[self.target_repo_path],
+            device_info={
+                "hostname": socket.gethostname(),
+                "os": platform.system(),
+                "arch": platform.machine(),
+            },
+        )
+        for provider in available_backends():
+            try:
+                backend = self.backend_factory(provider)
+                executable = getattr(backend, "executable_name", "")
+                command_path = (
+                    "dry-run"
+                    if provider == "dry-run"
+                    else shutil.which(executable) or executable or provider
+                )
+                is_available = backend.is_available()
+                self.store.upsert_runtime_capability(
+                    runtime_machine_id=self.runtime_id,
+                    provider=provider,
+                    command_path=command_path,
+                    status=RuntimeCapabilityStatus.AVAILABLE
+                    if is_available
+                    else RuntimeCapabilityStatus.UNAVAILABLE,
+                    health_error=None
+                    if is_available
+                    else f"{executable or provider} not found",
+                )
+            except Exception as exc:
+                self.store.upsert_runtime_capability(
+                    runtime_machine_id=self.runtime_id,
+                    provider=provider,
+                    command_path=provider,
+                    status=RuntimeCapabilityStatus.UNAVAILABLE,
+                    health_error=str(exc),
+                )
+        self._runtime_registered = True
 
     def _poll_once(self) -> Task | None:
         """Try to claim the oldest queued task for any agent. Returns task or None."""
@@ -203,8 +255,11 @@ class Daemon:
 
     def _send_heartbeat(self) -> None:
         """Update heartbeat timestamp in DB."""
+        if not self._runtime_registered:
+            self._register_runtime()
         now = datetime.now(timezone.utc)
         self._last_heartbeat = now
+        self.store.heartbeat_runtime_machine(self.runtime_id)
         self.store._conn.execute(
             """CREATE TABLE IF NOT EXISTS daemon_state (
                 key TEXT PRIMARY KEY,

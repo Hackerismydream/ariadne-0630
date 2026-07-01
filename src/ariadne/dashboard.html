@@ -57,6 +57,14 @@
       <div id="runtime-capabilities"><div class="empty">Loading...</div></div>
     </div>
     <div class="section">
+      <h2>RuntimeLeases</h2>
+      <div id="runtime-leases"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="section">
+      <h2>LeaderDecisions</h2>
+      <div id="leader-decisions"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="section">
       <h2>AgentProfiles</h2>
       <div id="agent-profiles"><div class="empty">Loading...</div></div>
     </div>
@@ -101,6 +109,8 @@ async function refresh() {
       agents,
       runtimeMachines,
       runtimeCapabilities,
+      runtimeLeases,
+      leaderDecisions,
       agentProfiles,
       skills,
       benchmarkRuns,
@@ -110,6 +120,8 @@ async function refresh() {
       fetchJSON('/api/agents'),
       fetchJSON('/api/runtime-machines'),
       fetchJSON('/api/runtime-capabilities'),
+      fetchJSON('/api/runtime-leases'),
+      fetchJSON('/api/leader-decisions'),
       fetchJSON('/api/agent-profiles'),
       fetchJSON('/api/skills'),
       fetchJSON('/api/benchmark-runs'),
@@ -119,6 +131,8 @@ async function refresh() {
     renderRoster(agents);
     renderRuntimeMachines(runtimeMachines);
     renderRuntimeCapabilities(runtimeCapabilities);
+    renderRuntimeLeases(runtimeLeases);
+    renderLeaderDecisions(leaderDecisions);
     renderAgentProfiles(agentProfiles);
     renderSkills(skills);
     renderBenchmarkRuns(benchmarkRuns);
@@ -174,6 +188,22 @@ function renderRuntimeCapabilities(runtimeCapabilities) {
   if (!runtimeCapabilities.length) { el.innerHTML = '<div class="empty">No RuntimeCapabilities.</div>'; return; }
   el.innerHTML = runtimeCapabilities.map(c =>
     `<div class="item"><span class="badge ${c.status}">${c.status}</span> ${c.provider}<br><small>${c.command_path || 'no command'}</small></div>`
+  ).join('');
+}
+
+function renderRuntimeLeases(runtimeLeases) {
+  const el = document.getElementById('runtime-leases');
+  if (!runtimeLeases.length) { el.innerHTML = '<div class="empty">No RuntimeLeases.</div>'; return; }
+  el.innerHTML = runtimeLeases.map(l =>
+    `<div class="item"><span class="badge ${l.status}">${l.status}</span> ${l.id}<br><small>taskrun=${l.taskrun_id.slice(0, 12)} runtime=${l.runtime_machine_id}</small></div>`
+  ).join('');
+}
+
+function renderLeaderDecisions(leaderDecisions) {
+  const el = document.getElementById('leader-decisions');
+  if (!leaderDecisions.length) { el.innerHTML = '<div class="empty">No LeaderDecisions.</div>'; return; }
+  el.innerHTML = leaderDecisions.map(d =>
+    `<div class="item"><span class="badge ${d.outcome}">${d.outcome}</span> issue=${d.issue_id}<br><small>${d.reason || 'no reason'}</small></div>`
   ).join('');
 }
 

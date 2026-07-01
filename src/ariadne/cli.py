@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import typer
 
@@ -19,11 +20,11 @@ from ariadne.store import Store
 app = typer.Typer(help="Ariadne: local multi-agent orchestration platform.")
 
 # Shared store instance
-_db_path = "ariadne.db"
+_db_path = os.environ.get("ARIADNE_DB", "ariadne.db")
 
 
 def _get_store() -> Store:
-    return Store(_db_path)
+    return Store(os.environ.get("ARIADNE_DB", _db_path))
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +71,44 @@ def capability_list(
             f"  {capability.id}  {capability.provider}  "
             f"[{capability.status.value}]  runtime={capability.runtime_machine_id}"
             f"{health}"
+        )
+    store.close()
+
+
+@app.command()
+def runtime_lease_list(
+    taskrun_id: str | None = typer.Option(None, "--taskrun-id"),
+):
+    """List RuntimeLeases."""
+    store = _get_store()
+    leases = store.list_runtime_leases(taskrun_id)
+    if not leases:
+        typer.echo("No runtime leases.")
+        store.close()
+        return
+    for lease in leases:
+        typer.echo(
+            f"  {lease.id}  [{lease.status.value}]  taskrun={lease.taskrun_id}  "
+            f"runtime={lease.runtime_machine_id}  capability={lease.runtime_capability_id}"
+        )
+    store.close()
+
+
+@app.command()
+def leader_decision_list(
+    issue_id: str | None = typer.Argument(None),
+):
+    """List LeaderDecision records."""
+    store = _get_store()
+    decisions = store.list_leader_decisions(issue_id)
+    if not decisions:
+        typer.echo("No leader decisions.")
+        store.close()
+        return
+    for decision in decisions:
+        typer.echo(
+            f"  {decision.id}  [{decision.outcome.value}]  issue={decision.issue_id}  "
+            f"created_taskruns={decision.created_taskrun_ids}  reason={decision.reason}"
         )
     store.close()
 
@@ -542,6 +581,133 @@ def benchmark_list():
             f"issue={run.issue_id}  success={success}"
         )
     store.close()
+
+
+@app.command()
+def demo_v1(
+    output_dir: str = typer.Option(".ariadne-demo-v1", "--output-dir"),
+    reset: bool = typer.Option(False, "--reset"),
+):
+    """Run the five-minute local Managed Agent Team Runtime v1 demo."""
+    from ariadne.eval import BenchmarkTask, run_benchmark
+    from ariadne.models import DelegationDecision, LeaderDecision, LeaderDecisionOutcome
+    from ariadne.orchestrator import Orchestrator
+
+    demo_dir = Path(output_dir)
+    demo_dir.mkdir(parents=True, exist_ok=True)
+    db_path = demo_dir / "ariadne-v1.db"
+    if reset and db_path.exists():
+        db_path.unlink()
+
+    store = Store(str(db_path))
+    try:
+        leader = store.create_agent_profile(
+            name="Demo Leader",
+            instructions="Coordinate the local demo and close only after member facts exist.",
+            preferred_capabilities=["dry-run"],
+            runtime_policy={"allow_real_execution": False},
+        )
+        coder = store.create_agent_profile(
+            name="Demo Coder",
+            instructions="Execute dry-run implementation work for the demo.",
+            preferred_capabilities=["dry-run"],
+            runtime_policy={"allow_real_execution": False},
+        )
+        skill = store.create_skill(
+            name=f"demo-dry-run-skill-{len(store.list_skills()) + 1}",
+            description="Dry-run demo skill",
+            when_to_use="Use for the clean-checkout demo.",
+            prompt_snippet="Report dry-run facts without touching external providers.",
+            tools_allowed=["dry-run"],
+            test_command="uv run pytest -q",
+            source_path="demo-v1",
+            version="1",
+        )
+        store.bind_skill_to_agent_profile(coder.id, skill.id)
+        squad = store.create_squad(
+            "Demo Runtime Squad",
+            leader.id,
+            instructions="Delegate once, then mark done after member completion.",
+        )
+        store.add_squad_member(squad.id, coder.id, role="coder")
+        issue = store.create_issue(
+            "Demo managed-agent runtime",
+            "Create observable dry-run runtime facts for v1.",
+            AssigneeType.SQUAD,
+            squad.id,
+        )
+        store.enqueue_taskrun(issue.id, leader.id, squad_id=squad.id)
+
+        call_count = [0]
+
+        def decide(briefing, issue, completed_results=None):
+            call_count[0] += 1
+            if not completed_results:
+                entry = briefing.roster[0]
+                return DelegationDecision(
+                    target_agent_id=entry.agent_id,
+                    backend="dry-run",
+                    handoff_prompt="Run the local v1 demo path in dry-run mode.",
+                    reason="demo delegation",
+                    skill_refs=entry.skills,
+                )
+            return LeaderDecision(
+                outcome=LeaderDecisionOutcome.DONE,
+                reason="demo member task completed with observable facts",
+            )
+
+        daemon = Daemon(
+            store=store,
+            backend_factory=get_backend,
+            runtime_id="demo-v1",
+            poll_interval=0.001,
+            orchestrator=Orchestrator(store=store, llm_decide=decide),
+            target_repo_path=str(demo_dir),
+        )
+        daemon.start(max_iterations=10)
+
+        benchmark = run_benchmark(
+            store,
+            [
+                BenchmarkTask(
+                    title="Demo Benchmark",
+                    description="BenchmarkRun from demo product facts.",
+                    backend="dry-run",
+                    expected_success=True,
+                    suite_name="demo-v1",
+                )
+            ],
+        )
+
+        issue = store.get_issue(issue.id)
+        taskruns = store.list_taskruns()
+        leases = store.list_runtime_leases()
+        decisions = store.list_leader_decisions()
+        benchmark_runs = store.list_benchmark_runs()
+
+        typer.echo("Ariadne Managed Agent Team Runtime v1 demo complete")
+        typer.echo(f"DB: {db_path}")
+        typer.echo(f"Issue: {issue.id} status={issue.status.value}")
+        typer.echo(f"RuntimeMachines: {len(store.list_runtime_machines())}")
+        typer.echo(f"RuntimeCapabilities: {len(store.list_runtime_capabilities())}")
+        typer.echo(f"TaskRuns: {len(taskruns)}")
+        typer.echo(f"RuntimeLeases: {len(leases)}")
+        typer.echo(f"LeaderDecisions: {len(decisions)}")
+        typer.echo(f"BenchmarkRuns: {len(benchmark_runs)}")
+        typer.echo(f"Benchmark success: {benchmark.success_count}/{benchmark.total_tasks}")
+        typer.echo("States: dry-run=completed, live-execution=skipped, blocked=0, failed=0")
+        typer.echo("")
+        typer.echo("Inspect with:")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne runtime-list")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne capability-list")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne taskrun-list")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne runtime-lease-list")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne leader-decision-list {issue.id}")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne issue-timeline {issue.id}")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne benchmark-list")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne api-serve")
+    finally:
+        store.close()
 
 
 # ---------------------------------------------------------------------------

@@ -89,6 +89,39 @@ def _benchmark_run_payload(run) -> dict:
     }
 
 
+def _runtime_lease_payload(lease) -> dict:
+    return {
+        "id": lease.id,
+        "taskrun_id": lease.taskrun_id,
+        "runtime_machine_id": lease.runtime_machine_id,
+        "runtime_capability_id": lease.runtime_capability_id,
+        "status": lease.status.value,
+        "lease_token": lease.lease_token,
+        "acquired_at": lease.acquired_at.isoformat(),
+        "last_heartbeat_at": lease.last_heartbeat_at.isoformat()
+        if lease.last_heartbeat_at
+        else None,
+        "released_at": lease.released_at.isoformat() if lease.released_at else None,
+        "expires_at": lease.expires_at.isoformat(),
+        "revoke_reason": lease.revoke_reason,
+        "metadata": lease.metadata,
+    }
+
+
+def _leader_decision_payload(decision) -> dict:
+    return {
+        "id": decision.id,
+        "issue_id": decision.issue_id,
+        "squad_id": decision.squad_id,
+        "leader_task_id": decision.leader_task_id,
+        "outcome": decision.outcome.value,
+        "reason": decision.reason,
+        "delegation_payload": decision.delegation_payload,
+        "created_taskrun_ids": decision.created_taskrun_ids,
+        "created_at": decision.created_at.isoformat() if decision.created_at else None,
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     """Serve the single-page HTML dashboard."""
@@ -196,6 +229,24 @@ def list_runtime_capabilities():
         }
         for c in capabilities
     ]
+
+
+@app.get("/api/runtime-leases")
+def list_runtime_leases():
+    """List RuntimeLeases."""
+    store = _get_store()
+    leases = store.list_runtime_leases()
+    store.close()
+    return [_runtime_lease_payload(lease) for lease in leases]
+
+
+@app.get("/api/leader-decisions")
+def list_leader_decisions():
+    """List LeaderDecision records."""
+    store = _get_store()
+    decisions = store.list_leader_decisions()
+    store.close()
+    return [_leader_decision_payload(decision) for decision in decisions]
 
 
 @app.post("/api/agent-profiles")

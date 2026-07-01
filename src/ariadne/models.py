@@ -87,6 +87,14 @@ class RuntimeLeaseStatus(str, Enum):
     REVOKED = "revoked"
 
 
+class AgentProfileStatus(str, Enum):
+    """Lifecycle state of a durable teammate profile."""
+
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    ARCHIVED = "archived"
+
+
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
@@ -233,8 +241,39 @@ class TaskRunClaim(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Agent / Squad
+# AgentProfile / Skill / Squad
 # ---------------------------------------------------------------------------
+
+
+class Skill(BaseModel):
+    """First-class routing and execution guidance bindable to AgentProfiles."""
+
+    id: str
+    name: str
+    description: str = ""
+    when_to_use: str = ""
+    prompt_snippet: str = ""
+    tools_allowed: list[str] = Field(default_factory=list)
+    test_command: str | None = None
+    source_path: str | None = None
+    version: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentProfile(BaseModel):
+    """Durable teammate identity and routing policy."""
+
+    id: str
+    name: str
+    description: str = ""
+    instructions: str = ""
+    preferred_capabilities: list[str] = Field(default_factory=list)
+    runtime_policy: dict = Field(default_factory=dict)
+    max_concurrent_taskruns: int = 1
+    status: AgentProfileStatus = AgentProfileStatus.ACTIVE
+    created_at: datetime
+    updated_at: datetime
 
 
 class Agent(BaseModel):

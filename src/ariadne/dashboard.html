@@ -56,6 +56,14 @@
       <h2>RuntimeCapabilities</h2>
       <div id="runtime-capabilities"><div class="empty">Loading...</div></div>
     </div>
+    <div class="section">
+      <h2>AgentProfiles</h2>
+      <div id="agent-profiles"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="section">
+      <h2>Skills</h2>
+      <div id="skills"><div class="empty">Loading...</div></div>
+    </div>
   </div>
   <div class="right">
     <div class="section">
@@ -83,18 +91,30 @@ async function fetchJSON(url) {
 
 async function refresh() {
   try {
-    const [issues, taskruns, agents, runtimeMachines, runtimeCapabilities] = await Promise.all([
+    const [
+      issues,
+      taskruns,
+      agents,
+      runtimeMachines,
+      runtimeCapabilities,
+      agentProfiles,
+      skills,
+    ] = await Promise.all([
       fetchJSON('/api/issues'),
       fetchJSON('/api/taskruns'),
       fetchJSON('/api/agents'),
       fetchJSON('/api/runtime-machines'),
       fetchJSON('/api/runtime-capabilities'),
+      fetchJSON('/api/agent-profiles'),
+      fetchJSON('/api/skills'),
     ]);
     renderIssues(issues);
     renderTaskRuns(taskruns);
     renderRoster(agents);
     renderRuntimeMachines(runtimeMachines);
     renderRuntimeCapabilities(runtimeCapabilities);
+    renderAgentProfiles(agentProfiles);
+    renderSkills(skills);
   } catch (e) {
     document.getElementById('issues').innerHTML = '<div class="empty">Failed to load. Is the API running?</div>';
   }
@@ -147,6 +167,22 @@ function renderRuntimeCapabilities(runtimeCapabilities) {
   if (!runtimeCapabilities.length) { el.innerHTML = '<div class="empty">No RuntimeCapabilities.</div>'; return; }
   el.innerHTML = runtimeCapabilities.map(c =>
     `<div class="item"><span class="badge ${c.status}">${c.status}</span> ${c.provider}<br><small>${c.command_path || 'no command'}</small></div>`
+  ).join('');
+}
+
+function renderAgentProfiles(agentProfiles) {
+  const el = document.getElementById('agent-profiles');
+  if (!agentProfiles.length) { el.innerHTML = '<div class="empty">No AgentProfiles.</div>'; return; }
+  el.innerHTML = agentProfiles.map(p =>
+    `<div class="item"><span class="badge ${p.status}">${p.status}</span> ${p.name}<br><small>capabilities=${p.preferred_capabilities.join(', ') || 'none'} skills=${p.skills.join(', ') || 'none'}</small></div>`
+  ).join('');
+}
+
+function renderSkills(skills) {
+  const el = document.getElementById('skills');
+  if (!skills.length) { el.innerHTML = '<div class="empty">No Skills.</div>'; return; }
+  el.innerHTML = skills.map(s =>
+    `<div class="item">${s.name}<br><small>tools=${s.tools_allowed.join(', ') || 'none'} version=${s.version || 'unversioned'}</small></div>`
   ).join('');
 }
 

@@ -6,6 +6,7 @@ Per docs/plan/tasks/core-003.md.
 
 from __future__ import annotations
 
+import json
 import os
 
 import typer
@@ -298,6 +299,113 @@ def agent_list():
         typer.echo(
             f"  {agent.id}  {agent.name}  backends={agent.backends}  skills={agent.skills}"
         )
+    store.close()
+
+
+@app.command()
+def agent_profile_create(
+    name: str = typer.Option(..., "--name", "-n"),
+    description: str = typer.Option("", "--description"),
+    instructions: str = typer.Option("", "--instructions"),
+    capability: list[str] = typer.Option([], "--capability", "-c"),
+    runtime_policy: str = typer.Option("{}", "--runtime-policy"),
+    max_concurrent_taskruns: int = typer.Option(1, "--max-concurrent-taskruns"),
+):
+    """Create a durable AgentProfile and compatibility Agent."""
+    try:
+        policy = json.loads(runtime_policy)
+    except json.JSONDecodeError as exc:
+        typer.echo(f"Invalid runtime policy JSON: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    store = _get_store()
+    profile = store.create_agent_profile(
+        name=name,
+        description=description,
+        instructions=instructions,
+        preferred_capabilities=capability or ["dry-run"],
+        runtime_policy=policy,
+        max_concurrent_taskruns=max_concurrent_taskruns,
+    )
+    typer.echo(f"Created agent profile: {profile.id} (name={profile.name})")
+    store.close()
+
+
+@app.command()
+def agent_profile_list():
+    """List AgentProfiles with bound Skills."""
+    store = _get_store()
+    profiles = store.list_agent_profiles()
+    if not profiles:
+        typer.echo("No agent profiles.")
+        store.close()
+        return
+    for profile in profiles:
+        skills = [skill.name for skill in store.list_skills_for_agent_profile(profile.id)]
+        typer.echo(
+            f"  {profile.id}  {profile.name}  "
+            f"capabilities={profile.preferred_capabilities}  skills={skills}"
+        )
+    store.close()
+
+
+@app.command()
+def skill_create(
+    name: str = typer.Option(..., "--name", "-n"),
+    description: str = typer.Option("", "--description"),
+    when_to_use: str = typer.Option("", "--when-to-use"),
+    prompt_snippet: str = typer.Option("", "--prompt-snippet"),
+    tool: list[str] = typer.Option([], "--tool"),
+    test_command: str = typer.Option("", "--test-command"),
+    source_path: str = typer.Option("", "--source-path"),
+    version: str = typer.Option("", "--version"),
+):
+    """Create a first-class Skill."""
+    store = _get_store()
+    skill = store.create_skill(
+        name=name,
+        description=description,
+        when_to_use=when_to_use,
+        prompt_snippet=prompt_snippet,
+        tools_allowed=tool,
+        test_command=test_command or None,
+        source_path=source_path or None,
+        version=version,
+    )
+    typer.echo(f"Created skill: {skill.id} (name={skill.name})")
+    store.close()
+
+
+@app.command()
+def skill_list():
+    """List first-class Skills."""
+    store = _get_store()
+    skills = store.list_skills()
+    if not skills:
+        typer.echo("No skills.")
+        store.close()
+        return
+    for skill in skills:
+        typer.echo(
+            f"  {skill.id}  {skill.name}  tools={skill.tools_allowed}  "
+            f"version={skill.version}"
+        )
+    store.close()
+
+
+@app.command()
+def agent_profile_bind_skill(
+    agent_profile_id: str = typer.Argument(...),
+    skill_id_or_name: str = typer.Argument(...),
+):
+    """Bind a Skill to an AgentProfile."""
+    store = _get_store()
+    try:
+        skill = store.bind_skill_to_agent_profile(agent_profile_id, skill_id_or_name)
+    except KeyError as exc:
+        typer.echo(str(exc), err=True)
+        store.close()
+        raise typer.Exit(1) from exc
+    typer.echo(f"Bound skill {skill.id} to agent profile {agent_profile_id}")
     store.close()
 
 

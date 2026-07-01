@@ -71,12 +71,14 @@ def generate_briefing(store: Store, squad_id: str) -> SquadBriefing:
             # Deleted agent race — skip silently
             continue
 
+        bound_skills = store.list_skills_for_agent_profile(agent.id)
+        skill_names = [skill.name for skill in bound_skills] or agent.skills
         roster.append(
             RosterEntry(
                 agent_id=agent.id,
                 name=agent.name,
                 role=member.role,
-                skills=agent.skills,
+                skills=skill_names,
                 backends=agent.backends,
             )
         )

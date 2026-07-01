@@ -11,17 +11,32 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ariadne.models import (
     Agent,
+    AgentProfile,
+    AgentProfileStatus,
     AssigneeType,
+    BenchmarkRun,
     FailureReason,
     Issue,
     IssueStatus,
+    IssueTimelineEvent,
+    LeaderDecision,
+    LeaderDecisionOutcome,
+    RuntimeCapability,
+    RuntimeCapabilityStatus,
+    RuntimeLease,
+    RuntimeLeaseStatus,
+    RuntimeMachine,
+    RuntimeMachineStatus,
+    Skill,
     Squad,
     SquadMember,
     Task,
+    TaskRun,
+    TaskRunClaim,
     TaskStatus,
 )
 
@@ -52,6 +67,10 @@ class MaxAttemptsExhausted(Exception):
 # (from_status, to_status) pairs that are legal.
 _LEGAL_TRANSITIONS: set[tuple[TaskStatus, TaskStatus]] = {
     (TaskStatus.QUEUED, TaskStatus.CLAIMED),
+    (TaskStatus.QUEUED, TaskStatus.PREPARING),
+    (TaskStatus.PREPARING, TaskStatus.RUNNING),
+    (TaskStatus.PREPARING, TaskStatus.FAILED),
+    (TaskStatus.PREPARING, TaskStatus.CANCELLED),
     (TaskStatus.CLAIMED, TaskStatus.RUNNING),
     (TaskStatus.CLAIMED, TaskStatus.QUEUED),       # stale claim recovery
     (TaskStatus.RUNNING, TaskStatus.COMPLETED),
@@ -74,6 +93,57 @@ def _new_id(prefix: str) -> str:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS runtime_machine (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('online', 'offline', 'draining', 'disabled')),
+    version TEXT NOT NULL DEFAULT '',
+    device_info TEXT NOT NULL DEFAULT '{}',
+    last_heartbeat_at TEXT,
+    max_concurrent_taskruns INTEGER NOT NULL DEFAULT 1,
+    workspace_root TEXT NOT NULL DEFAULT '',
+    repo_allowlist TEXT NOT NULL DEFAULT '[]',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runtime_capability (
+    id TEXT PRIMARY KEY,
+    runtime_machine_id TEXT NOT NULL REFERENCES runtime_machine(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    command_path TEXT NOT NULL DEFAULT '',
+    version TEXT NOT NULL DEFAULT '',
+    models_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL
+        CHECK (status IN ('available', 'unavailable', 'degraded', 'disabled')),
+    health_error TEXT,
+    default_args_json TEXT NOT NULL DEFAULT '[]',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    last_checked_at TEXT,
+    UNIQUE(runtime_machine_id, provider, command_path)
+);
+
+CREATE TABLE IF NOT EXISTS runtime_lease (
+    id TEXT PRIMARY KEY,
+    taskrun_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+    runtime_machine_id TEXT NOT NULL REFERENCES runtime_machine(id),
+    runtime_capability_id TEXT NOT NULL REFERENCES runtime_capability(id),
+    status TEXT NOT NULL
+        CHECK (status IN ('active', 'released', 'expired', 'revoked')),
+    lease_token TEXT NOT NULL UNIQUE,
+    acquired_at TEXT NOT NULL,
+    last_heartbeat_at TEXT,
+    released_at TEXT,
+    expires_at TEXT NOT NULL,
+    revoke_reason TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_lease_one_active
+    ON runtime_lease(taskrun_id) WHERE status = 'active';
+
 CREATE TABLE IF NOT EXISTS issue (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -85,19 +155,36 @@ CREATE TABLE IF NOT EXISTS issue (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS issue_timeline_event (
+    id TEXT PRIMARY KEY,
+    issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    actor_type TEXT NOT NULL,
+    actor_id TEXT,
+    taskrun_id TEXT REFERENCES task(id),
+    runtime_lease_id TEXT REFERENCES runtime_lease(id),
+    leader_decision_id TEXT,
+    comment_id TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_issue_timeline_issue_time
+    ON issue_timeline_event(issue_id, created_at);
+
 CREATE TABLE IF NOT EXISTS task (
     id TEXT PRIMARY KEY,
     issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
     agent_id TEXT NOT NULL,
     squad_id TEXT,
     status TEXT NOT NULL DEFAULT 'queued'
-        CHECK (status IN ('queued', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
+        CHECK (status IN ('queued', 'preparing', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
     attempt INTEGER NOT NULL DEFAULT 1,
     max_attempts INTEGER NOT NULL DEFAULT 2,
     parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
     failure_reason TEXT
         CHECK (failure_reason IS NULL OR failure_reason IN
-               ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery', 'manual')),
+               ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery', 'manual', 'policy_blocked')),
     dispatched_at TEXT,
     started_at TEXT,
     completed_at TEXT,
@@ -105,11 +192,45 @@ CREATE TABLE IF NOT EXISTS task (
     error TEXT,
     runtime_id TEXT,
     handoff_prompt TEXT,
+    trace_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_claim
     ON task(status, created_at) WHERE status = 'queued';
+
+CREATE TABLE IF NOT EXISTS leader_decision (
+    id TEXT PRIMARY KEY,
+    issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+    squad_id TEXT NOT NULL REFERENCES squad(id) ON DELETE CASCADE,
+    leader_task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+    outcome TEXT NOT NULL
+        CHECK (outcome IN ('action', 'no_action', 'failed', 'done')),
+    reason TEXT NOT NULL DEFAULT '',
+    delegation_payload_json TEXT NOT NULL DEFAULT '{}',
+    created_taskrun_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_leader_decision_issue_time
+    ON leader_decision(issue_id, created_at);
+
+CREATE TABLE IF NOT EXISTS benchmark_run (
+    id TEXT PRIMARY KEY,
+    suite_name TEXT NOT NULL,
+    case_name TEXT NOT NULL,
+    issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+    runtime_policy_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    artifact_dir TEXT NOT NULL DEFAULT '',
+    metrics_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_benchmark_run_suite_case
+    ON benchmark_run(suite_name, case_name, started_at);
 
 CREATE TABLE IF NOT EXISTS activity_log (
     id TEXT PRIMARY KEY,
@@ -121,6 +242,41 @@ CREATE TABLE IF NOT EXISTS activity_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_activity_trace ON activity_log(trace_id);
+
+CREATE TABLE IF NOT EXISTS agent_profile (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    instructions TEXT NOT NULL DEFAULT '',
+    preferred_capabilities_json TEXT NOT NULL DEFAULT '[]',
+    runtime_policy_json TEXT NOT NULL DEFAULT '{}',
+    max_concurrent_taskruns INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'disabled', 'archived')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    when_to_use TEXT NOT NULL DEFAULT '',
+    prompt_snippet TEXT NOT NULL DEFAULT '',
+    tools_allowed_json TEXT NOT NULL DEFAULT '[]',
+    test_command TEXT,
+    source_path TEXT,
+    version TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_profile_skill (
+    agent_profile_id TEXT NOT NULL REFERENCES agent_profile(id) ON DELETE CASCADE,
+    skill_id TEXT NOT NULL REFERENCES skill(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (agent_profile_id, skill_id)
+);
 
 CREATE TABLE IF NOT EXISTS agent (
     id TEXT PRIMARY KEY,
@@ -159,7 +315,7 @@ class Store:
         import threading
         self._lock = threading.Lock()
 
-        # Migration: add handoff_prompt column if not present
+        self._migrate_task_table_if_needed()
         cols = [r[1] for r in self._conn.execute("PRAGMA table_info(task)").fetchall()]
         if "handoff_prompt" not in cols:
             self._conn.execute("ALTER TABLE task ADD COLUMN handoff_prompt TEXT")
@@ -174,6 +330,88 @@ class Store:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _migrate_task_table_if_needed(self) -> None:
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'task'"
+        ).fetchone()
+        if row is None:
+            return
+        table_sql = row["sql"] or ""
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(task)").fetchall()]
+        needs_rebuild = (
+            "preparing" not in table_sql
+            or "policy_blocked" not in table_sql
+            or "trace_id" not in cols
+        )
+        if not needs_rebuild:
+            return
+
+        select_exprs = []
+        for column in (
+            "id",
+            "issue_id",
+            "agent_id",
+            "squad_id",
+            "status",
+            "attempt",
+            "max_attempts",
+            "parent_task_id",
+            "failure_reason",
+            "dispatched_at",
+            "started_at",
+            "completed_at",
+            "result",
+            "error",
+            "runtime_id",
+            "handoff_prompt",
+            "trace_id",
+            "created_at",
+        ):
+            select_exprs.append(column if column in cols else f"NULL AS {column}")
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        self._conn.execute("DROP INDEX IF EXISTS idx_task_claim")
+        self._conn.execute(
+            """CREATE TABLE task_new (
+                id TEXT PRIMARY KEY,
+                issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                squad_id TEXT,
+                status TEXT NOT NULL DEFAULT 'queued'
+                    CHECK (status IN ('queued', 'preparing', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
+                attempt INTEGER NOT NULL DEFAULT 1,
+                max_attempts INTEGER NOT NULL DEFAULT 2,
+                parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
+                failure_reason TEXT
+                    CHECK (failure_reason IS NULL OR failure_reason IN
+                           ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery', 'manual', 'policy_blocked')),
+                dispatched_at TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                result TEXT,
+                error TEXT,
+                runtime_id TEXT,
+                handoff_prompt TEXT,
+                trace_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"""
+        )
+        self._conn.execute(
+            f"""INSERT INTO task_new
+               (id, issue_id, agent_id, squad_id, status, attempt, max_attempts,
+                parent_task_id, failure_reason, dispatched_at, started_at,
+                completed_at, result, error, runtime_id, handoff_prompt,
+                trace_id, created_at)
+               SELECT {", ".join(select_exprs)} FROM task"""
+        )
+        self._conn.execute("DROP TABLE task")
+        self._conn.execute("ALTER TABLE task_new RENAME TO task")
+        self._conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_task_claim
+               ON task(status, created_at) WHERE status = 'queued'"""
+        )
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.commit()
 
     @staticmethod
     def _row_to_task(row: sqlite3.Row) -> Task:
@@ -208,6 +446,11 @@ class Store:
         )
 
     @staticmethod
+    def _row_to_taskrun(row: sqlite3.Row) -> TaskRun:
+        task = Store._row_to_task(row)
+        return TaskRun(**task.model_dump())
+
+    @staticmethod
     def _row_to_issue(row: sqlite3.Row) -> Issue:
         return Issue(
             id=row["id"],
@@ -217,6 +460,143 @@ class Store:
             assignee_type=AssigneeType(row["assignee_type"]),
             assignee_id=row["assignee_id"],
             created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_issue_timeline_event(row: sqlite3.Row) -> IssueTimelineEvent:
+        return IssueTimelineEvent(
+            id=row["id"],
+            issue_id=row["issue_id"],
+            event_type=row["event_type"],
+            actor_type=row["actor_type"],
+            actor_id=row["actor_id"],
+            taskrun_id=row["taskrun_id"],
+            runtime_lease_id=row["runtime_lease_id"],
+            leader_decision_id=row["leader_decision_id"],
+            comment_id=row["comment_id"],
+            payload=json.loads(row["payload_json"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_leader_decision(row: sqlite3.Row) -> LeaderDecision:
+        return LeaderDecision(
+            id=row["id"],
+            issue_id=row["issue_id"],
+            squad_id=row["squad_id"],
+            leader_task_id=row["leader_task_id"],
+            outcome=LeaderDecisionOutcome(row["outcome"]),
+            reason=row["reason"],
+            delegation_payload=json.loads(row["delegation_payload_json"]),
+            created_taskrun_ids=json.loads(row["created_taskrun_ids_json"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_benchmark_run(row: sqlite3.Row) -> BenchmarkRun:
+        return BenchmarkRun(
+            id=row["id"],
+            suite_name=row["suite_name"],
+            case_name=row["case_name"],
+            issue_id=row["issue_id"],
+            runtime_policy=json.loads(row["runtime_policy_json"]),
+            status=row["status"],
+            started_at=datetime.fromisoformat(row["started_at"]),
+            completed_at=datetime.fromisoformat(row["completed_at"])
+            if row["completed_at"]
+            else None,
+            summary=json.loads(row["summary_json"]),
+            artifact_dir=row["artifact_dir"],
+            metrics=json.loads(row["metrics_json"]),
+        )
+
+    @staticmethod
+    def _row_to_runtime_machine(row: sqlite3.Row) -> RuntimeMachine:
+        return RuntimeMachine(
+            id=row["id"],
+            name=row["name"],
+            status=RuntimeMachineStatus(row["status"]),
+            version=row["version"],
+            device_info=json.loads(row["device_info"]),
+            last_heartbeat_at=datetime.fromisoformat(row["last_heartbeat_at"])
+            if row["last_heartbeat_at"]
+            else None,
+            max_concurrent_taskruns=row["max_concurrent_taskruns"],
+            workspace_root=row["workspace_root"],
+            repo_allowlist=json.loads(row["repo_allowlist"]),
+            metadata=json.loads(row["metadata"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_runtime_capability(row: sqlite3.Row) -> RuntimeCapability:
+        return RuntimeCapability(
+            id=row["id"],
+            runtime_machine_id=row["runtime_machine_id"],
+            provider=row["provider"],
+            command_path=row["command_path"],
+            version=row["version"],
+            models=json.loads(row["models_json"]),
+            status=RuntimeCapabilityStatus(row["status"]),
+            health_error=row["health_error"],
+            default_args=json.loads(row["default_args_json"]),
+            metadata=json.loads(row["metadata"]),
+            last_checked_at=datetime.fromisoformat(row["last_checked_at"])
+            if row["last_checked_at"]
+            else None,
+        )
+
+    @staticmethod
+    def _row_to_runtime_lease(row: sqlite3.Row) -> RuntimeLease:
+        return RuntimeLease(
+            id=row["id"],
+            taskrun_id=row["taskrun_id"],
+            runtime_machine_id=row["runtime_machine_id"],
+            runtime_capability_id=row["runtime_capability_id"],
+            status=RuntimeLeaseStatus(row["status"]),
+            lease_token=row["lease_token"],
+            acquired_at=datetime.fromisoformat(row["acquired_at"]),
+            last_heartbeat_at=datetime.fromisoformat(row["last_heartbeat_at"])
+            if row["last_heartbeat_at"]
+            else None,
+            released_at=datetime.fromisoformat(row["released_at"])
+            if row["released_at"]
+            else None,
+            expires_at=datetime.fromisoformat(row["expires_at"]),
+            revoke_reason=row["revoke_reason"],
+            metadata=json.loads(row["metadata"]),
+        )
+
+    @staticmethod
+    def _row_to_agent_profile(row: sqlite3.Row) -> AgentProfile:
+        return AgentProfile(
+            id=row["id"],
+            name=row["name"],
+            description=row["description"],
+            instructions=row["instructions"],
+            preferred_capabilities=json.loads(row["preferred_capabilities_json"]),
+            runtime_policy=json.loads(row["runtime_policy_json"]),
+            max_concurrent_taskruns=row["max_concurrent_taskruns"],
+            status=AgentProfileStatus(row["status"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_skill(row: sqlite3.Row) -> Skill:
+        return Skill(
+            id=row["id"],
+            name=row["name"],
+            description=row["description"],
+            when_to_use=row["when_to_use"],
+            prompt_snippet=row["prompt_snippet"],
+            tools_allowed=json.loads(row["tools_allowed_json"]),
+            test_command=row["test_command"],
+            source_path=row["source_path"],
+            version=row["version"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
     @staticmethod
@@ -262,8 +642,647 @@ class Store:
             raise InvalidStateTransition(current.value, action)
 
     # ------------------------------------------------------------------
+    # RuntimeMachine / RuntimeCapability
+    # ------------------------------------------------------------------
+
+    def register_runtime_machine(
+        self,
+        runtime_machine_id: str,
+        name: str,
+        version: str = "",
+        workspace_root: str = "",
+        max_concurrent_taskruns: int = 1,
+        repo_allowlist: list[str] | None = None,
+        device_info: dict | None = None,
+        metadata: dict | None = None,
+    ) -> RuntimeMachine:
+        now = _now_iso()
+        existing = self.get_runtime_machine(runtime_machine_id)
+        created_at = existing.created_at.isoformat() if existing else now
+        self._conn.execute(
+            """INSERT INTO runtime_machine
+               (id, name, status, version, device_info, last_heartbeat_at,
+                max_concurrent_taskruns, workspace_root, repo_allowlist,
+                metadata, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    status = excluded.status,
+                    version = excluded.version,
+                    device_info = excluded.device_info,
+                    max_concurrent_taskruns = excluded.max_concurrent_taskruns,
+                    workspace_root = excluded.workspace_root,
+                    repo_allowlist = excluded.repo_allowlist,
+                    metadata = excluded.metadata,
+                    updated_at = excluded.updated_at""",
+            (
+                runtime_machine_id,
+                name,
+                RuntimeMachineStatus.ONLINE.value,
+                version,
+                json.dumps(device_info or {}),
+                existing.last_heartbeat_at.isoformat()
+                if existing and existing.last_heartbeat_at
+                else None,
+                max_concurrent_taskruns,
+                workspace_root,
+                json.dumps(repo_allowlist or []),
+                json.dumps(metadata or {}),
+                created_at,
+                now,
+            ),
+        )
+        self._conn.commit()
+        machine = self.get_runtime_machine(runtime_machine_id)
+        if machine is None:
+            raise KeyError(f"runtime machine not found: {runtime_machine_id}")
+        return machine
+
+    def heartbeat_runtime_machine(self, runtime_machine_id: str) -> RuntimeMachine:
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE runtime_machine
+               SET status = ?, last_heartbeat_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (RuntimeMachineStatus.ONLINE.value, now, now, runtime_machine_id),
+        )
+        self._conn.commit()
+        machine = self.get_runtime_machine(runtime_machine_id)
+        if machine is None:
+            raise KeyError(f"runtime machine not found: {runtime_machine_id}")
+        return machine
+
+    def get_runtime_machine(self, runtime_machine_id: str) -> RuntimeMachine | None:
+        row = self._conn.execute(
+            "SELECT * FROM runtime_machine WHERE id = ?", (runtime_machine_id,)
+        ).fetchone()
+        return self._row_to_runtime_machine(row) if row else None
+
+    def list_runtime_machines(self) -> list[RuntimeMachine]:
+        rows = self._conn.execute(
+            "SELECT * FROM runtime_machine ORDER BY name"
+        ).fetchall()
+        return [self._row_to_runtime_machine(r) for r in rows]
+
+    def upsert_runtime_capability(
+        self,
+        runtime_machine_id: str,
+        provider: str,
+        command_path: str = "",
+        version: str = "",
+        status: RuntimeCapabilityStatus = RuntimeCapabilityStatus.UNAVAILABLE,
+        health_error: str | None = None,
+        models: list[str] | None = None,
+        default_args: list[str] | None = None,
+        metadata: dict | None = None,
+    ) -> RuntimeCapability:
+        now = _now_iso()
+        existing = self._conn.execute(
+            """SELECT * FROM runtime_capability
+               WHERE runtime_machine_id = ? AND provider = ? AND command_path = ?""",
+            (runtime_machine_id, provider, command_path),
+        ).fetchone()
+        capability_id = existing["id"] if existing else _new_id("cap")
+        self._conn.execute(
+            """INSERT INTO runtime_capability
+               (id, runtime_machine_id, provider, command_path, version,
+                models_json, status, health_error, default_args_json, metadata,
+                last_checked_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(runtime_machine_id, provider, command_path) DO UPDATE SET
+                    version = excluded.version,
+                    models_json = excluded.models_json,
+                    status = excluded.status,
+                    health_error = excluded.health_error,
+                    default_args_json = excluded.default_args_json,
+                    metadata = excluded.metadata,
+                    last_checked_at = excluded.last_checked_at""",
+            (
+                capability_id,
+                runtime_machine_id,
+                provider,
+                command_path,
+                version,
+                json.dumps(models or []),
+                status.value,
+                health_error,
+                json.dumps(default_args or []),
+                json.dumps(metadata or {}),
+                now,
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM runtime_capability WHERE id = ?", (capability_id,)
+        ).fetchone()
+        return self._row_to_runtime_capability(row)
+
+    def list_runtime_capabilities(
+        self, runtime_machine_id: str | None = None
+    ) -> list[RuntimeCapability]:
+        if runtime_machine_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM runtime_capability ORDER BY provider"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT * FROM runtime_capability
+                   WHERE runtime_machine_id = ?
+                   ORDER BY provider""",
+                (runtime_machine_id,),
+            ).fetchall()
+        return [self._row_to_runtime_capability(r) for r in rows]
+
+    def get_runtime_capability(self, capability_id: str) -> RuntimeCapability | None:
+        row = self._conn.execute(
+            "SELECT * FROM runtime_capability WHERE id = ?", (capability_id,)
+        ).fetchone()
+        return self._row_to_runtime_capability(row) if row else None
+
+    def set_runtime_capability_status(
+        self,
+        capability_id: str,
+        status: RuntimeCapabilityStatus,
+        health_error: str | None = None,
+    ) -> RuntimeCapability:
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE runtime_capability
+               SET status = ?, health_error = ?, last_checked_at = ?
+               WHERE id = ?""",
+            (status.value, health_error, now, capability_id),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM runtime_capability WHERE id = ?", (capability_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"runtime capability not found: {capability_id}")
+        return self._row_to_runtime_capability(row)
+
+    def claim_taskrun_for_runtime_machine(
+        self,
+        runtime_machine_id: str,
+        lease_seconds: int = 60,
+    ) -> TaskRunClaim | None:
+        """Atomically claim the oldest queued TaskRun through a RuntimeLease."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                queued_tasks = self._conn.execute(
+                    """SELECT * FROM task
+                       WHERE status = 'queued'
+                       ORDER BY created_at"""
+                ).fetchall()
+                if not queued_tasks:
+                    self._conn.execute("COMMIT")
+                    return None
+                capabilities = self._conn.execute(
+                    """SELECT * FROM runtime_capability
+                       WHERE runtime_machine_id = ? AND status = 'available'
+                       ORDER BY provider""",
+                    (runtime_machine_id,),
+                ).fetchall()
+                task = None
+                capability = None
+                for candidate in queued_tasks:
+                    agent = self._conn.execute(
+                        "SELECT * FROM agent WHERE id = ?", (candidate["agent_id"],)
+                    ).fetchone()
+                    desired = (
+                        json.loads(agent["backends"])
+                        if agent and agent["backends"]
+                        else ["dry-run"]
+                    )
+                    for provider in desired or ["dry-run"]:
+                        capability = next(
+                            (
+                                cap
+                                for cap in capabilities
+                                if cap["provider"] == provider
+                            ),
+                            None,
+                        )
+                        if capability is not None:
+                            task = candidate
+                            break
+                    if capability is None and capabilities:
+                        capability = capabilities[0]
+                        task = candidate
+                    if task is not None:
+                        break
+                if task is None or capability is None:
+                    self._conn.execute("COMMIT")
+                    return None
+                now_dt = datetime.now(timezone.utc)
+                now = now_dt.isoformat()
+                lease_id = _new_id("lease")
+                self._conn.execute(
+                    """INSERT INTO runtime_lease
+                       (id, taskrun_id, runtime_machine_id, runtime_capability_id,
+                        status, lease_token, acquired_at, last_heartbeat_at,
+                        expires_at, metadata)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        lease_id,
+                        task["id"],
+                        runtime_machine_id,
+                        capability["id"],
+                        RuntimeLeaseStatus.ACTIVE.value,
+                        _new_id("lease-token"),
+                        now,
+                        now,
+                        (now_dt + timedelta(seconds=lease_seconds)).isoformat(),
+                        "{}",
+                    ),
+                )
+                self._conn.execute(
+                    """UPDATE task
+                       SET status = 'preparing', runtime_id = ?, dispatched_at = ?
+                       WHERE id = ?""",
+                    (runtime_machine_id, now, task["id"]),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        self.append_issue_timeline_event(
+            task["issue_id"],
+            "lease_acquired",
+            actor_type="runtime",
+            actor_id=runtime_machine_id,
+            taskrun_id=task["id"],
+            runtime_lease_id=lease_id,
+        )
+        self.append_issue_timeline_event(
+            task["issue_id"],
+            "taskrun_preparing",
+            actor_type="runtime",
+            actor_id=runtime_machine_id,
+            taskrun_id=task["id"],
+            runtime_lease_id=lease_id,
+            payload={"status": "preparing"},
+        )
+        taskrun = self.get_taskrun(task["id"])
+        lease = self.get_runtime_lease(lease_id)
+        if taskrun is None or lease is None:
+            raise KeyError("claim was committed but could not be reloaded")
+        return TaskRunClaim(taskrun=taskrun, lease=lease)
+
+    def get_runtime_lease(self, lease_id: str) -> RuntimeLease | None:
+        row = self._conn.execute(
+            "SELECT * FROM runtime_lease WHERE id = ?", (lease_id,)
+        ).fetchone()
+        return self._row_to_runtime_lease(row) if row else None
+
+    def get_active_runtime_lease_for_taskrun(
+        self, taskrun_id: str
+    ) -> RuntimeLease | None:
+        row = self._conn.execute(
+            """SELECT * FROM runtime_lease
+               WHERE taskrun_id = ? AND status = 'active'
+               ORDER BY acquired_at DESC LIMIT 1""",
+            (taskrun_id,),
+        ).fetchone()
+        return self._row_to_runtime_lease(row) if row else None
+
+    def list_runtime_leases(self, taskrun_id: str | None = None) -> list[RuntimeLease]:
+        if taskrun_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM runtime_lease ORDER BY acquired_at"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT * FROM runtime_lease
+                   WHERE taskrun_id = ?
+                   ORDER BY acquired_at""",
+                (taskrun_id,),
+            ).fetchall()
+        return [self._row_to_runtime_lease(r) for r in rows]
+
+    def heartbeat_runtime_lease(
+        self, lease_id: str, lease_seconds: int = 60
+    ) -> RuntimeLease:
+        now_dt = datetime.now(timezone.utc)
+        self._conn.execute(
+            """UPDATE runtime_lease
+               SET last_heartbeat_at = ?, expires_at = ?
+               WHERE id = ? AND status = 'active'""",
+            (
+                now_dt.isoformat(),
+                (now_dt + timedelta(seconds=lease_seconds)).isoformat(),
+                lease_id,
+            ),
+        )
+        self._conn.commit()
+        lease = self.get_runtime_lease(lease_id)
+        if lease is None:
+            raise KeyError(f"runtime lease not found: {lease_id}")
+        return lease
+
+    def release_runtime_lease(self, lease_id: str) -> RuntimeLease:
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE runtime_lease
+               SET status = 'released', released_at = ?
+               WHERE id = ? AND status = 'active'""",
+            (now, lease_id),
+        )
+        self._conn.commit()
+        lease = self.get_runtime_lease(lease_id)
+        if lease is None:
+            raise KeyError(f"runtime lease not found: {lease_id}")
+        task = self.get_task(lease.taskrun_id)
+        if task and lease.status == RuntimeLeaseStatus.RELEASED:
+            self.append_issue_timeline_event(
+                task.issue_id,
+                "lease_released",
+                actor_type="runtime",
+                actor_id=lease.runtime_machine_id,
+                taskrun_id=task.id,
+                runtime_lease_id=lease.id,
+            )
+        return lease
+
+    def revoke_runtime_lease(
+        self, lease_id: str, reason: str = "revoked"
+    ) -> RuntimeLease:
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE runtime_lease
+               SET status = 'revoked', released_at = ?, revoke_reason = ?
+               WHERE id = ? AND status = 'active'""",
+            (now, reason, lease_id),
+        )
+        self._conn.commit()
+        lease = self.get_runtime_lease(lease_id)
+        if lease is None:
+            raise KeyError(f"runtime lease not found: {lease_id}")
+        task = self.get_task(lease.taskrun_id)
+        if task and lease.status == RuntimeLeaseStatus.REVOKED:
+            self.append_issue_timeline_event(
+                task.issue_id,
+                "lease_revoked",
+                actor_type="system",
+                taskrun_id=task.id,
+                runtime_lease_id=lease.id,
+                payload={"reason": reason},
+            )
+        return lease
+
+    def expire_runtime_leases(self) -> list[RuntimeLease]:
+        now_dt = datetime.now(timezone.utc)
+        rows = self._conn.execute(
+            """SELECT * FROM runtime_lease
+               WHERE status = 'active' AND expires_at < ?
+               ORDER BY expires_at""",
+            (now_dt.isoformat(),),
+        ).fetchall()
+        expired: list[RuntimeLease] = []
+        for row in rows:
+            self._conn.execute(
+                "UPDATE runtime_lease SET status = 'expired' WHERE id = ?",
+                (row["id"],),
+            )
+            task = self.get_task(row["taskrun_id"])
+            if task and task.status in (
+                TaskStatus.PREPARING,
+                TaskStatus.RUNNING,
+                TaskStatus.CLAIMED,
+            ):
+                self._conn.execute(
+                    """UPDATE task
+                       SET status = 'failed', failure_reason = ?,
+                           error = ?, completed_at = ?
+                       WHERE id = ?""",
+                    (
+                        FailureReason.RUNTIME_OFFLINE.value,
+                        "runtime lease expired",
+                        now_dt.isoformat(),
+                        task.id,
+                    ),
+                )
+                self.append_issue_timeline_event(
+                    task.issue_id,
+                    "lease_expired",
+                    actor_type="system",
+                    taskrun_id=task.id,
+                    runtime_lease_id=row["id"],
+                )
+                self.append_issue_timeline_event(
+                    task.issue_id,
+                    "taskrun_failed",
+                    actor_type="system",
+                    taskrun_id=task.id,
+                    runtime_lease_id=row["id"],
+                    payload={
+                        "error": "runtime lease expired",
+                        "failure_reason": FailureReason.RUNTIME_OFFLINE.value,
+                    },
+                )
+            expired.append(
+                RuntimeLease(
+                    **{
+                        **self._row_to_runtime_lease(row).model_dump(),
+                        "status": RuntimeLeaseStatus.EXPIRED,
+                    }
+                )
+            )
+        if rows:
+            self._conn.commit()
+        return expired
+
+    # ------------------------------------------------------------------
     # Issue
     # ------------------------------------------------------------------
+
+    def append_issue_timeline_event(
+        self,
+        issue_id: str,
+        event_type: str,
+        actor_type: str = "system",
+        actor_id: str | None = None,
+        taskrun_id: str | None = None,
+        runtime_lease_id: str | None = None,
+        leader_decision_id: str | None = None,
+        comment_id: str | None = None,
+        payload: dict | None = None,
+    ) -> IssueTimelineEvent:
+        event_id = _new_id("evt")
+        created_at = _now_iso()
+        self._conn.execute(
+            """INSERT INTO issue_timeline_event
+               (id, issue_id, event_type, actor_type, actor_id, taskrun_id,
+                runtime_lease_id, leader_decision_id, comment_id, payload_json,
+                created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event_id,
+                issue_id,
+                event_type,
+                actor_type,
+                actor_id,
+                taskrun_id,
+                runtime_lease_id,
+                leader_decision_id,
+                comment_id,
+                json.dumps(payload or {}),
+                created_at,
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM issue_timeline_event WHERE id = ?", (event_id,)
+        ).fetchone()
+        return self._row_to_issue_timeline_event(row)
+
+    def get_issue_timeline(self, issue_id: str) -> list[IssueTimelineEvent]:
+        rows = self._conn.execute(
+            """SELECT * FROM issue_timeline_event
+               WHERE issue_id = ?
+               ORDER BY created_at, id""",
+            (issue_id,),
+        ).fetchall()
+        return [self._row_to_issue_timeline_event(r) for r in rows]
+
+    def record_leader_decision(
+        self,
+        issue_id: str,
+        squad_id: str,
+        leader_task_id: str,
+        outcome: LeaderDecisionOutcome,
+        reason: str = "",
+        delegation_payload: dict | None = None,
+        created_taskrun_ids: list[str] | None = None,
+    ) -> LeaderDecision:
+        decision_id = _new_id("leaderdecision")
+        created_at = _now_iso()
+        self._conn.execute(
+            """INSERT INTO leader_decision
+               (id, issue_id, squad_id, leader_task_id, outcome, reason,
+                delegation_payload_json, created_taskrun_ids_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                decision_id,
+                issue_id,
+                squad_id,
+                leader_task_id,
+                outcome.value,
+                reason,
+                json.dumps(delegation_payload or {}),
+                json.dumps(created_taskrun_ids or []),
+                created_at,
+            ),
+        )
+        self._conn.commit()
+        decision = self.get_leader_decision(decision_id)
+        if decision is None:
+            raise KeyError(f"leader decision not found: {decision_id}")
+        self.append_issue_timeline_event(
+            issue_id,
+            "leader_decided",
+            actor_type="leader",
+            taskrun_id=leader_task_id,
+            leader_decision_id=decision.id,
+            payload={
+                "outcome": outcome.value,
+                "reason": reason,
+                "delegation_payload": delegation_payload or {},
+                "created_taskrun_ids": created_taskrun_ids or [],
+            },
+        )
+        return decision
+
+    def get_leader_decision(self, decision_id: str) -> LeaderDecision | None:
+        row = self._conn.execute(
+            "SELECT * FROM leader_decision WHERE id = ?", (decision_id,)
+        ).fetchone()
+        return self._row_to_leader_decision(row) if row else None
+
+    def list_leader_decisions(self, issue_id: str | None = None) -> list[LeaderDecision]:
+        if issue_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM leader_decision ORDER BY created_at, id"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT * FROM leader_decision
+                   WHERE issue_id = ?
+                   ORDER BY created_at, id""",
+                (issue_id,),
+            ).fetchall()
+        return [self._row_to_leader_decision(r) for r in rows]
+
+    def create_benchmark_run(
+        self,
+        suite_name: str,
+        case_name: str,
+        issue_id: str,
+        runtime_policy: dict | None = None,
+        artifact_dir: str = "",
+        status: str = "running",
+    ) -> BenchmarkRun:
+        run_id = _new_id("bench")
+        started_at = _now_iso()
+        self._conn.execute(
+            """INSERT INTO benchmark_run
+               (id, suite_name, case_name, issue_id, runtime_policy_json, status,
+                started_at, artifact_dir)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id,
+                suite_name,
+                case_name,
+                issue_id,
+                json.dumps(runtime_policy or {}),
+                status,
+                started_at,
+                artifact_dir,
+            ),
+        )
+        self._conn.commit()
+        run = self.get_benchmark_run(run_id)
+        if run is None:
+            raise KeyError(f"benchmark run not found: {run_id}")
+        return run
+
+    def complete_benchmark_run(
+        self,
+        benchmark_run_id: str,
+        status: str,
+        summary: dict,
+        metrics: dict,
+    ) -> BenchmarkRun:
+        self._conn.execute(
+            """UPDATE benchmark_run
+               SET status = ?, completed_at = ?, summary_json = ?,
+                   metrics_json = ?
+               WHERE id = ?""",
+            (
+                status,
+                _now_iso(),
+                json.dumps(summary),
+                json.dumps(metrics),
+                benchmark_run_id,
+            ),
+        )
+        self._conn.commit()
+        run = self.get_benchmark_run(benchmark_run_id)
+        if run is None:
+            raise KeyError(f"benchmark run not found: {benchmark_run_id}")
+        return run
+
+    def get_benchmark_run(self, benchmark_run_id: str) -> BenchmarkRun | None:
+        row = self._conn.execute(
+            "SELECT * FROM benchmark_run WHERE id = ?", (benchmark_run_id,)
+        ).fetchone()
+        return self._row_to_benchmark_run(row) if row else None
+
+    def list_benchmark_runs(self) -> list[BenchmarkRun]:
+        rows = self._conn.execute(
+            "SELECT * FROM benchmark_run ORDER BY started_at DESC, id DESC"
+        ).fetchall()
+        return [self._row_to_benchmark_run(r) for r in rows]
 
     def create_issue(
         self,
@@ -295,6 +1314,12 @@ class Store:
             ),
         )
         self._conn.commit()
+        self.append_issue_timeline_event(
+            issue.id,
+            "issue_created",
+            actor_type="user",
+            payload={"title": issue.title},
+        )
         return issue
 
     def get_issue(self, issue_id: str) -> Issue | None:
@@ -316,6 +1341,12 @@ class Store:
         issue = self.get_issue(issue_id)
         if issue is None:
             raise KeyError(f"issue not found: {issue_id}")
+        if status in (IssueStatus.DONE, IssueStatus.CANCELLED):
+            self.append_issue_timeline_event(
+                issue_id,
+                "issue_closed",
+                payload={"status": status.value},
+            )
         return issue
 
     # ------------------------------------------------------------------
@@ -330,13 +1361,50 @@ class Store:
         handoff_prompt: str | None = None,
         trace_id: str | None = None,
     ) -> Task:
+        return self._enqueue_task_record(
+            "task",
+            issue_id,
+            agent_id,
+            squad_id=squad_id,
+            handoff_prompt=handoff_prompt,
+            trace_id=trace_id,
+        )
+
+    def enqueue_taskrun(
+        self,
+        issue_id: str,
+        agent_profile_id: str,
+        squad_id: str | None = None,
+        handoff_prompt: str | None = None,
+        trace_id: str | None = None,
+    ) -> TaskRun:
+        task = self._enqueue_task_record(
+            "taskrun",
+            issue_id,
+            agent_profile_id,
+            squad_id=squad_id,
+            handoff_prompt=handoff_prompt,
+            trace_id=trace_id,
+        )
+        return TaskRun(**task.model_dump())
+
+    def _enqueue_task_record(
+        self,
+        id_prefix: str,
+        issue_id: str,
+        agent_id: str,
+        squad_id: str | None = None,
+        handoff_prompt: str | None = None,
+        trace_id: str | None = None,
+    ) -> Task:
+        composed_handoff = self._compose_taskrun_handoff(agent_id, handoff_prompt)
         task = Task(
-            id=_new_id("task"),
+            id=_new_id(id_prefix),
             issue_id=issue_id,
             agent_id=agent_id,
             squad_id=squad_id,
             status=TaskStatus.QUEUED,
-            handoff_prompt=handoff_prompt,
+            handoff_prompt=composed_handoff,
             trace_id=trace_id or _new_id("trace"),
             created_at=datetime.now(timezone.utc),
         )
@@ -362,6 +1430,12 @@ class Store:
         )
         self._conn.commit()
         self.log_activity(task.trace_id, task.id, "created", {"status": "queued"})
+        self.append_issue_timeline_event(
+            task.issue_id,
+            "taskrun_queued",
+            taskrun_id=task.id,
+            payload={"status": "queued", "attempt": task.attempt},
+        )
         return task
 
     def claim_task(self, agent_id: str, runtime_id: str) -> Task | None:
@@ -399,6 +1473,10 @@ class Store:
                 ).fetchone()
             )
 
+    def claim_taskrun(self, agent_profile_id: str, runtime_id: str) -> TaskRun | None:
+        task = self.claim_task(agent_profile_id, runtime_id)
+        return TaskRun(**task.model_dump()) if task else None
+
     def start_task(self, task_id: str) -> Task:
         task = self._load_task(task_id)
         self._check_transition(task.status, TaskStatus.RUNNING, "start_task")
@@ -408,7 +1486,20 @@ class Store:
             (now, task_id),
         )
         self._conn.commit()
-        return self._load_task(task_id)
+        task = self._load_task(task_id)
+        self.append_issue_timeline_event(
+            task.issue_id,
+            "taskrun_started",
+            actor_type="runtime",
+            actor_id=task.runtime_id,
+            taskrun_id=task.id,
+            payload={"status": "running"},
+        )
+        return task
+
+    def start_taskrun(self, taskrun_id: str) -> TaskRun:
+        task = self.start_task(taskrun_id)
+        return TaskRun(**task.model_dump())
 
     def complete_task(self, task_id: str, result: dict) -> Task:
         task = self._load_task(task_id)
@@ -421,7 +1512,20 @@ class Store:
             (json.dumps(result), now, task_id),
         )
         self._conn.commit()
-        return self._load_task(task_id)
+        task = self._load_task(task_id)
+        self.append_issue_timeline_event(
+            task.issue_id,
+            "taskrun_completed",
+            actor_type="agent",
+            actor_id=task.agent_id,
+            taskrun_id=task.id,
+            payload={"result": result},
+        )
+        return task
+
+    def complete_taskrun(self, taskrun_id: str, result: dict) -> TaskRun:
+        task = self.complete_task(taskrun_id, result)
+        return TaskRun(**task.model_dump())
 
     def fail_task(self, task_id: str, error: str, reason: FailureReason) -> Task:
         task = self._load_task(task_id)
@@ -434,13 +1538,33 @@ class Store:
             (error, reason.value, now, task_id),
         )
         self._conn.commit()
-        return self._load_task(task_id)
+        task = self._load_task(task_id)
+        self.append_issue_timeline_event(
+            task.issue_id,
+            "taskrun_failed",
+            actor_type="agent",
+            actor_id=task.agent_id,
+            taskrun_id=task.id,
+            payload={"error": error, "failure_reason": reason.value},
+        )
+        return task
+
+    def fail_taskrun(
+        self, taskrun_id: str, error: str, reason: FailureReason
+    ) -> TaskRun:
+        task = self.fail_task(taskrun_id, error, reason)
+        return TaskRun(**task.model_dump())
 
     def cancel_task(self, task_id: str) -> Task:
         task = self._load_task(task_id)
         # Cancel is only legal from running (per design doc).
         # But we also allow cancelling queued/claimed for user-initiated cancel.
-        if task.status not in (TaskStatus.QUEUED, TaskStatus.CLAIMED, TaskStatus.RUNNING):
+        if task.status not in (
+            TaskStatus.QUEUED,
+            TaskStatus.PREPARING,
+            TaskStatus.CLAIMED,
+            TaskStatus.RUNNING,
+        ):
             raise InvalidStateTransition(task.status.value, "cancel_task")
         now = _now_iso()
         self._conn.execute(
@@ -450,8 +1574,36 @@ class Store:
                WHERE id = ?""",
             (now, task_id),
         )
+        lease = self.get_active_runtime_lease_for_taskrun(task_id)
+        if lease is not None:
+            self._conn.execute(
+                """UPDATE runtime_lease
+                   SET status = 'revoked', released_at = ?, revoke_reason = ?
+                   WHERE id = ?""",
+                (now, "taskrun_cancelled", lease.id),
+            )
         self._conn.commit()
+        if lease is not None:
+            self.append_issue_timeline_event(
+                task.issue_id,
+                "lease_revoked",
+                actor_type="system",
+                taskrun_id=task.id,
+                runtime_lease_id=lease.id,
+                payload={"reason": "taskrun_cancelled"},
+            )
+        self.append_issue_timeline_event(
+            task.issue_id,
+            "taskrun_cancelled",
+            actor_type="system",
+            taskrun_id=task.id,
+            payload={"status": "cancelled"},
+        )
         return self._load_task(task_id)
+
+    def cancel_taskrun(self, taskrun_id: str) -> TaskRun:
+        task = self.cancel_task(taskrun_id)
+        return TaskRun(**task.model_dump())
 
     def retry_task(self, task_id: str) -> Task:
         """Create a new queued task that re-attempts the failed one.
@@ -466,7 +1618,7 @@ class Store:
                 f"task {task_id} already reached max_attempts ({old.max_attempts})"
             )
         new_task = Task(
-            id=_new_id("task"),
+            id=_new_id("taskrun" if old.id.startswith("taskrun-") else "task"),
             issue_id=old.issue_id,
             agent_id=old.agent_id,
             squad_id=old.squad_id,
@@ -500,7 +1652,25 @@ class Store:
         )
         self._conn.commit()
         self.log_activity(new_task.trace_id, new_task.id, "retried", {"attempt": new_task.attempt, "parent": old.id})
+        self.append_issue_timeline_event(
+            old.issue_id,
+            "retry_scheduled",
+            actor_type="system",
+            taskrun_id=old.id,
+            payload={"retry_taskrun_id": new_task.id, "attempt": new_task.attempt},
+        )
+        self.append_issue_timeline_event(
+            new_task.issue_id,
+            "taskrun_queued",
+            actor_type="system",
+            taskrun_id=new_task.id,
+            payload={"status": "queued", "attempt": new_task.attempt},
+        )
         return new_task
+
+    def retry_taskrun(self, taskrun_id: str) -> TaskRun:
+        task = self.retry_task(taskrun_id)
+        return TaskRun(**task.model_dump())
 
     def get_task(self, task_id: str) -> Task | None:
         row = self._conn.execute(
@@ -508,12 +1678,22 @@ class Store:
         ).fetchone()
         return self._row_to_task(row) if row else None
 
+    def get_taskrun(self, taskrun_id: str) -> TaskRun | None:
+        row = self._conn.execute(
+            "SELECT * FROM task WHERE id = ?", (taskrun_id,)
+        ).fetchone()
+        return self._row_to_taskrun(row) if row else None
+
+    def list_taskruns(self) -> list[TaskRun]:
+        rows = self._conn.execute("SELECT * FROM task ORDER BY created_at DESC").fetchall()
+        return [self._row_to_taskrun(r) for r in rows]
+
     def get_pending_member_tasks(self, squad_id: str) -> list[Task]:
         """Return non-terminal tasks belonging to squad members (not the leader)."""
         rows = self._conn.execute(
             """SELECT * FROM task
                WHERE squad_id = ?
-                 AND status IN ('queued', 'claimed', 'running')
+                 AND status IN ('queued', 'preparing', 'claimed', 'running')
                ORDER BY created_at""",
             (squad_id,),
         ).fetchall()
@@ -547,8 +1727,212 @@ class Store:
         return recovered
 
     # ------------------------------------------------------------------
-    # Agent
+    # AgentProfile / Skill / Agent
     # ------------------------------------------------------------------
+
+    def create_agent_profile(
+        self,
+        name: str,
+        description: str = "",
+        instructions: str = "",
+        preferred_capabilities: list[str] | None = None,
+        runtime_policy: dict | None = None,
+        max_concurrent_taskruns: int = 1,
+        status: AgentProfileStatus = AgentProfileStatus.ACTIVE,
+    ) -> AgentProfile:
+        now = _now_iso()
+        profile = AgentProfile(
+            id=_new_id("profile"),
+            name=name,
+            description=description,
+            instructions=instructions,
+            preferred_capabilities=preferred_capabilities or [],
+            runtime_policy=runtime_policy or {},
+            max_concurrent_taskruns=max_concurrent_taskruns,
+            status=status,
+            created_at=datetime.fromisoformat(now),
+            updated_at=datetime.fromisoformat(now),
+        )
+        self._conn.execute(
+            """INSERT INTO agent_profile
+               (id, name, description, instructions, preferred_capabilities_json,
+                runtime_policy_json, max_concurrent_taskruns, status, created_at,
+                updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                profile.id,
+                profile.name,
+                profile.description,
+                profile.instructions,
+                json.dumps(profile.preferred_capabilities),
+                json.dumps(profile.runtime_policy),
+                profile.max_concurrent_taskruns,
+                profile.status.value,
+                profile.created_at.isoformat(),
+                profile.updated_at.isoformat(),
+            ),
+        )
+        self._conn.execute(
+            """INSERT INTO agent (id, name, instructions, backends, skills)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                profile.id,
+                profile.name,
+                profile.instructions,
+                json.dumps(profile.preferred_capabilities),
+                "[]",
+            ),
+        )
+        self._conn.commit()
+        return profile
+
+    def get_agent_profile(self, agent_profile_id: str) -> AgentProfile | None:
+        row = self._conn.execute(
+            "SELECT * FROM agent_profile WHERE id = ?", (agent_profile_id,)
+        ).fetchone()
+        return self._row_to_agent_profile(row) if row else None
+
+    def list_agent_profiles(self) -> list[AgentProfile]:
+        rows = self._conn.execute(
+            "SELECT * FROM agent_profile ORDER BY name"
+        ).fetchall()
+        return [self._row_to_agent_profile(r) for r in rows]
+
+    def create_skill(
+        self,
+        name: str,
+        description: str = "",
+        when_to_use: str = "",
+        prompt_snippet: str = "",
+        tools_allowed: list[str] | None = None,
+        test_command: str | None = None,
+        source_path: str | None = None,
+        version: str = "",
+    ) -> Skill:
+        now = _now_iso()
+        skill = Skill(
+            id=_new_id("skill"),
+            name=name,
+            description=description,
+            when_to_use=when_to_use,
+            prompt_snippet=prompt_snippet,
+            tools_allowed=tools_allowed or [],
+            test_command=test_command,
+            source_path=source_path,
+            version=version,
+            created_at=datetime.fromisoformat(now),
+            updated_at=datetime.fromisoformat(now),
+        )
+        self._conn.execute(
+            """INSERT INTO skill
+               (id, name, description, when_to_use, prompt_snippet,
+                tools_allowed_json, test_command, source_path, version,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                skill.id,
+                skill.name,
+                skill.description,
+                skill.when_to_use,
+                skill.prompt_snippet,
+                json.dumps(skill.tools_allowed),
+                skill.test_command,
+                skill.source_path,
+                skill.version,
+                skill.created_at.isoformat(),
+                skill.updated_at.isoformat(),
+            ),
+        )
+        self._conn.commit()
+        return skill
+
+    def get_skill(self, skill_id: str) -> Skill | None:
+        row = self._conn.execute(
+            "SELECT * FROM skill WHERE id = ?", (skill_id,)
+        ).fetchone()
+        return self._row_to_skill(row) if row else None
+
+    def get_skill_by_name(self, name: str) -> Skill | None:
+        row = self._conn.execute(
+            "SELECT * FROM skill WHERE name = ?", (name,)
+        ).fetchone()
+        return self._row_to_skill(row) if row else None
+
+    def resolve_skill(self, skill_id_or_name: str) -> Skill | None:
+        return self.get_skill(skill_id_or_name) or self.get_skill_by_name(skill_id_or_name)
+
+    def list_skills(self) -> list[Skill]:
+        rows = self._conn.execute("SELECT * FROM skill ORDER BY name").fetchall()
+        return [self._row_to_skill(r) for r in rows]
+
+    def bind_skill_to_agent_profile(
+        self, agent_profile_id: str, skill_id_or_name: str
+    ) -> Skill:
+        profile = self.get_agent_profile(agent_profile_id)
+        if profile is None:
+            raise KeyError(f"agent profile not found: {agent_profile_id}")
+        skill = self.resolve_skill(skill_id_or_name)
+        if skill is None:
+            raise KeyError(f"skill not found: {skill_id_or_name}")
+        self._conn.execute(
+            """INSERT OR IGNORE INTO agent_profile_skill
+               (agent_profile_id, skill_id, created_at)
+               VALUES (?, ?, ?)""",
+            (agent_profile_id, skill.id, _now_iso()),
+        )
+        self._conn.commit()
+        self._sync_legacy_agent_from_profile(agent_profile_id)
+        return skill
+
+    def list_skills_for_agent_profile(self, agent_profile_id: str) -> list[Skill]:
+        rows = self._conn.execute(
+            """SELECT skill.*
+               FROM skill
+               JOIN agent_profile_skill ON agent_profile_skill.skill_id = skill.id
+               WHERE agent_profile_skill.agent_profile_id = ?
+               ORDER BY skill.name""",
+            (agent_profile_id,),
+        ).fetchall()
+        return [self._row_to_skill(r) for r in rows]
+
+    def _sync_legacy_agent_from_profile(self, agent_profile_id: str) -> None:
+        profile = self.get_agent_profile(agent_profile_id)
+        if profile is None:
+            raise KeyError(f"agent profile not found: {agent_profile_id}")
+        skill_names = [skill.name for skill in self.list_skills_for_agent_profile(profile.id)]
+        self._conn.execute(
+            """INSERT INTO agent (id, name, instructions, backends, skills)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    instructions = excluded.instructions,
+                    backends = excluded.backends,
+                    skills = excluded.skills""",
+            (
+                profile.id,
+                profile.name,
+                profile.instructions,
+                json.dumps(profile.preferred_capabilities),
+                json.dumps(skill_names),
+            ),
+        )
+        self._conn.commit()
+
+    def _compose_taskrun_handoff(
+        self, agent_profile_id: str, handoff_prompt: str | None
+    ) -> str | None:
+        skills = self.list_skills_for_agent_profile(agent_profile_id)
+        snippets = [
+            f"- {skill.name}: {skill.prompt_snippet}"
+            for skill in skills
+            if skill.prompt_snippet
+        ]
+        if not snippets:
+            return handoff_prompt
+        section = "Skill routing guidance:\n" + "\n".join(snippets)
+        if not handoff_prompt:
+            return section
+        return f"{handoff_prompt}\n\n{section}"
 
     def create_agent(
         self,

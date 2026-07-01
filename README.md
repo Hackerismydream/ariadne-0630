@@ -9,7 +9,7 @@ Reference: [multica](https://github.com/multica-ai/multica) (38k★, Go + Next.j
 ```
 ┌──────────────────────────────────────────────────────────┐
 │  CLI Layer (typer)                                        │
-│  issue/agent/squad/daemon/benchmark commands              │
+│  issue/taskrun/runtime/profile/skill/squad/benchmark       │
 │  Zero business logic — only serialization and routing     │
 ├──────────────────────────────────────────────────────────┤
 │  Orchestration Layer                                      │
@@ -19,9 +19,9 @@ Reference: [multica](https://github.com/multica-ai/multica) (38k★, Go + Next.j
 │  llm_decide.py      LLM-backed delegation decision        │
 ├──────────────────────────────────────────────────────────┤
 │  Service Layer                                            │
-│  store.py           SQLite persistence + state transitions│
-│  daemon.py          Poll loop, heartbeat, claim, cancel   │
-│  eval.py            LLM-as-judge + benchmark harness      │
+│  store.py           SQLite product facts + transitions    │
+│  daemon.py          RuntimeMachine, leases, execution gate │
+│  eval.py            BenchmarkRun from product facts       │
 ├──────────────────────────────────────────────────────────┤
 │  Execution Layer                                          │
 │  backends.py        ExecutionBackend protocol             │
@@ -29,7 +29,8 @@ Reference: [multica](https://github.com/multica-ai/multica) (38k★, Go + Next.j
 │                     Safety gate, diff capture, timeout    │
 ├──────────────────────────────────────────────────────────┤
 │  SQLite (ariadne.db)                                      │
-│  Tables: issue, task, agent, squad, squad_member          │
+│  Tables: issue, taskrun/task, runtime, lease, profile,    │
+│          skill, leader_decision, benchmark_run            │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -56,6 +57,35 @@ ariadne issue-list
 ariadne benchmark-run --iterations 5 --backend dry-run
 ```
 
+## Five-Minute v1 Demo
+
+From a clean checkout:
+
+```bash
+uv sync --extra dev
+uv run ariadne demo-v1 --reset
+```
+
+The demo creates a local dry-run squad, executes the daemon, and records
+RuntimeMachines, RuntimeCapabilities, TaskRuns, RuntimeLeases, IssueTimeline
+events, LeaderDecisions, and a BenchmarkRun. It does not require Codex, Claude,
+or provider credentials.
+
+Inspect the generated DB:
+
+```bash
+export ARIADNE_DB=.ariadne-demo-v1/ariadne-v1.db
+uv run ariadne runtime-list
+uv run ariadne capability-list
+uv run ariadne taskrun-list
+uv run ariadne runtime-lease-list
+uv run ariadne leader-decision-list
+uv run ariadne benchmark-list
+uv run ariadne api-serve
+```
+
+See [docs/demo-v1.md](docs/demo-v1.md) for the full verification path.
+
 ## Multica Mapping
 
 | Mechanism | Multica source | What we keep | What we change |
@@ -81,7 +111,10 @@ uv run ruff check src/ariadne/
 uv run pytest tests/ -v
 ```
 
-112 tests covering: state machine transitions, atomic claim, retry chain, failure classification, squad briefing, leader delegation, event loop, LLM decide, backend safety gates, diff capture, E2E squad loop, evaluation, benchmark.
+The suite covers state transitions, atomic claim, TaskRun compatibility,
+runtime registration, leases, IssueTimeline, AgentProfiles, Skills,
+LeaderDecisions, ExecutionPolicy, BenchmarkRuns, squad orchestration, backend
+safety gates, and the clean-checkout demo.
 
 ## Project Structure
 
@@ -94,7 +127,8 @@ src/ariadne/
 ├── orchestrator.py    # Leader delegation + event loop
 ├── llm_decide.py      # LLM-backed delegation (OpenAI-compatible)
 ├── backends.py        # Codex/Claude/DryRun + safety gate + diff
-├── eval.py            # LLM-as-judge + benchmark harness
+├── policy.py          # Layered ExecutionPolicy gate
+├── eval.py            # BenchmarkRun from product facts + evaluation
 └── cli.py             # Typer CLI entry point
 tests/                 # 112 tests
 docs/                  # Architecture docs + delivery plan
@@ -102,7 +136,7 @@ docs/                  # Architecture docs + delivery plan
 
 ## Non-goals
 
-- No frontend / web UI
+- No production frontend beyond the local inspection dashboard
 - No knowledge pipeline / RAG / vector DB
 - No multi-workspace / auth / Postgres
 - No autopilot / scheduled tasks / chat sessions

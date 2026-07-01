@@ -7,18 +7,24 @@ Synchronous loop — no threads, no asyncio. Sufficient for local single-user.
 from __future__ import annotations
 
 import logging
+import platform
+import shutil
+import socket
 import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from ariadne.backends import ExecutionBackend
+from ariadne.backends import ExecutionBackend, available_backends
 from ariadne.models import (
     ExecutionContext,
     ExecutionResult,
     FailureReason,
     ProgressUpdate,
+    RuntimeCapabilityStatus,
     Task,
+    TaskStatus,
 )
+from ariadne.policy import evaluate_execution_policy
 from ariadne.store import MaxAttemptsExhausted, Store
 
 logger = logging.getLogger(__name__)
@@ -48,12 +54,14 @@ class Daemon:
         self.target_repo_path = target_repo_path
         self._running = False
         self._last_heartbeat: datetime | None = None
+        self._runtime_registered = False
 
     def start(self, max_iterations: int | None = None) -> None:
         """Run the poll loop. Stops on KeyboardInterrupt or max_iterations."""
         self._running = True
         iterations = 0
         try:
+            self._register_runtime()
             while self._running:
                 self._recover_stale_claims()
                 self._send_heartbeat()
@@ -77,14 +85,64 @@ class Daemon:
     def stop(self) -> None:
         self._running = False
 
+    def _register_runtime(self) -> None:
+        """Register this daemon as a RuntimeMachine and probe capabilities."""
+        self.store.register_runtime_machine(
+            runtime_machine_id=self.runtime_id,
+            name=f"{socket.gethostname()}:{self.runtime_id}",
+            version="0.1.0",
+            workspace_root=self.target_repo_path,
+            max_concurrent_taskruns=1,
+            repo_allowlist=[self.target_repo_path],
+            device_info={
+                "hostname": socket.gethostname(),
+                "os": platform.system(),
+                "arch": platform.machine(),
+            },
+        )
+        for provider in available_backends():
+            try:
+                backend = self.backend_factory(provider)
+                executable = getattr(backend, "executable_name", "")
+                command_path = (
+                    "dry-run"
+                    if provider == "dry-run"
+                    else shutil.which(executable) or executable or provider
+                )
+                is_available = backend.is_available()
+                self.store.upsert_runtime_capability(
+                    runtime_machine_id=self.runtime_id,
+                    provider=provider,
+                    command_path=command_path,
+                    status=RuntimeCapabilityStatus.AVAILABLE
+                    if is_available
+                    else RuntimeCapabilityStatus.UNAVAILABLE,
+                    health_error=None
+                    if is_available
+                    else f"{executable or provider} not found",
+                )
+            except Exception as exc:
+                self.store.upsert_runtime_capability(
+                    runtime_machine_id=self.runtime_id,
+                    provider=provider,
+                    command_path=provider,
+                    status=RuntimeCapabilityStatus.UNAVAILABLE,
+                    health_error=str(exc),
+                )
+        self._runtime_registered = True
+
     def _poll_once(self) -> Task | None:
-        """Try to claim the oldest queued task for any agent. Returns task or None."""
-        agents = self.store.list_agents()
-        for agent in agents:
-            task = self.store.claim_task(agent.id, self.runtime_id)
-            if task is not None:
-                logger.info("claimed task %s for agent %s", task.id, agent.name)
-                return task
+        """Try to claim the oldest queued TaskRun for this runtime."""
+        if not self._runtime_registered:
+            self._register_runtime()
+        claim = self.store.claim_taskrun_for_runtime_machine(self.runtime_id)
+        if claim is not None:
+            logger.info(
+                "claimed taskrun %s with lease %s",
+                claim.taskrun.id,
+                claim.lease.id,
+            )
+            return claim.taskrun
         return None
 
     def _execute_task(self, task: Task) -> None:
@@ -113,8 +171,13 @@ class Daemon:
             logger.error("no orchestrator set — cannot handle leader task %s", task.id)
             self.store.start_task(task.id)
             self.store.fail_task(task.id, "no orchestrator configured", FailureReason.AGENT_ERROR)
+            self._release_active_lease(task.id)
             return
+        latest = self.store.get_task(task.id)
+        if latest and latest.status in (TaskStatus.PREPARING, TaskStatus.CLAIMED):
+            self.store.start_task(task.id)
         self.orchestrator.handle_leader_task(task)
+        self._release_active_lease(task.id)
 
     def _execute_member_task(self, task: Task) -> None:
         """Execute a member task via backend."""
@@ -122,7 +185,7 @@ class Daemon:
         agent_name = agent.name if agent else "unknown"
         instructions = agent.instructions if agent else ""
 
-        self.store.start_task(task.id)  # claimed → running
+        task = self.store.start_task(task.id)  # claimed/preparing → running
         if task.trace_id:
             self.store.log_activity(task.trace_id, task.id, "started", {"backend": agent.backends[0] if agent and agent.backends else "dry-run"})
 
@@ -147,27 +210,65 @@ class Daemon:
             trace_id=task.trace_id,
         )
 
+        policy = evaluate_execution_policy(
+            self.store,
+            task=task,
+            context=context,
+            backend_name=backend_name,
+            runtime_id=self.runtime_id,
+        )
+        if not policy.allowed:
+            self.store.append_issue_timeline_event(
+                task.issue_id,
+                "execution_policy_blocked",
+                actor_type="runtime",
+                actor_id=self.runtime_id,
+                taskrun_id=task.id,
+                payload=policy.model_dump(mode="json"),
+            )
+            self.store.fail_task(task.id, policy.reason, FailureReason.POLICY_BLOCKED)
+            self._release_active_lease(task.id)
+            if task.trace_id:
+                self.store.log_activity(
+                    task.trace_id,
+                    task.id,
+                    "policy_blocked",
+                    policy.model_dump(mode="json"),
+                )
+            logger.warning(
+                "task %s blocked by execution policy layer %s: %s",
+                task.id,
+                policy.layer.value if policy.layer else "unknown",
+                policy.reason,
+            )
+            self._trigger_event_loop(task)
+            return
+
         try:
             result = backend.execute(context, on_progress=self._on_progress)
         except TimeoutError:
             self.store.fail_task(task.id, "execution timed out", FailureReason.TIMEOUT)
+            self._release_active_lease(task.id)
             self._maybe_retry(task)
             self._trigger_event_loop(task)
             return
         except Exception as e:
             self.store.fail_task(task.id, str(e), FailureReason.AGENT_ERROR)
+            self._release_active_lease(task.id)
             self._maybe_retry(task)
             self._trigger_event_loop(task)
             return
 
         if result.success:
             self.store.complete_task(task.id, _result_to_dict(result))
+            self._release_active_lease(task.id)
             if task.trace_id:
                 self.store.log_activity(task.trace_id, task.id, "completed", {"backend": result.backend_name})
             logger.info("task %s completed", task.id)
         else:
             reason = result.failure_reason or FailureReason.AGENT_ERROR
             self.store.fail_task(task.id, result.stderr or "execution failed", reason)
+            self._release_active_lease(task.id)
             if task.trace_id:
                 self.store.log_activity(task.trace_id, task.id, "failed", {"reason": reason.value, "error": result.stderr[:200] if result.stderr else ""})
             self._maybe_retry(task)
@@ -180,8 +281,17 @@ class Daemon:
         if self.orchestrator and task.squad_id:
             self.orchestrator.on_member_task_complete(task)
 
+    def _release_active_lease(self, task_id: str) -> None:
+        lease = self.store.get_active_runtime_lease_for_taskrun(task_id)
+        if lease is not None:
+            self.store.release_runtime_lease(lease.id)
+
     def _maybe_retry(self, task: Task) -> None:
         """Retry if attempts remain."""
+        latest = self.store.get_task(task.id)
+        if latest and latest.failure_reason == FailureReason.POLICY_BLOCKED:
+            logger.info("task %s: policy blocked, no retry", task.id)
+            return
         if task.attempt < task.max_attempts:
             try:
                 retried = self.store.retry_task(task.id)
@@ -193,6 +303,20 @@ class Daemon:
 
     def _on_progress(self, update: ProgressUpdate) -> None:
         logger.info("progress: %s (step %d/%d)", update.summary, update.step, update.total)
+        task = self.store.get_task(update.task_id)
+        if task is not None:
+            self.store.append_issue_timeline_event(
+                task.issue_id,
+                "progress_reported",
+                actor_type="runtime",
+                actor_id=task.runtime_id,
+                taskrun_id=task.id,
+                payload={
+                    "summary": update.summary,
+                    "step": update.step,
+                    "total": update.total,
+                },
+            )
 
     def _recover_stale_claims(self) -> int:
         """Move stale claimed tasks back to queued."""
@@ -203,8 +327,11 @@ class Daemon:
 
     def _send_heartbeat(self) -> None:
         """Update heartbeat timestamp in DB."""
+        if not self._runtime_registered:
+            self._register_runtime()
         now = datetime.now(timezone.utc)
         self._last_heartbeat = now
+        self.store.heartbeat_runtime_machine(self.runtime_id)
         self.store._conn.execute(
             """CREATE TABLE IF NOT EXISTS daemon_state (
                 key TEXT PRIMARY KEY,

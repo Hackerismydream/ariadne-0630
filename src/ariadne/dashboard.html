@@ -45,14 +45,46 @@
       <div id="issues"><div class="empty">Loading...</div></div>
     </div>
     <div class="section">
-      <h2>Tasks</h2>
-      <div id="tasks"><div class="empty">Loading...</div></div>
+      <h2>TaskRuns</h2>
+      <div id="taskruns"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="section">
+      <h2>RuntimeMachines</h2>
+      <div id="runtime-machines"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="section">
+      <h2>RuntimeCapabilities</h2>
+      <div id="runtime-capabilities"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="section">
+      <h2>RuntimeLeases</h2>
+      <div id="runtime-leases"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="section">
+      <h2>LeaderDecisions</h2>
+      <div id="leader-decisions"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="section">
+      <h2>AgentProfiles</h2>
+      <div id="agent-profiles"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="section">
+      <h2>Skills</h2>
+      <div id="skills"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="section">
+      <h2>BenchmarkRuns</h2>
+      <div id="benchmark-runs"><div class="empty">Loading...</div></div>
     </div>
   </div>
   <div class="right">
     <div class="section">
-      <h2>Task Timeline</h2>
-      <div id="timeline"><div class="empty">Select a task to see timeline.</div></div>
+      <h2>IssueTimeline</h2>
+      <div id="issue-timeline"><div class="empty">Select an issue to see IssueTimeline.</div></div>
+    </div>
+    <div class="section">
+      <h2>TaskRun Timeline</h2>
+      <div id="timeline"><div class="empty">Select a TaskRun to see timeline.</div></div>
     </div>
     <div class="section">
       <h2>Agent Roster</h2>
@@ -61,7 +93,8 @@
   </div>
 </div>
 <script>
-let selectedTaskId = null;
+let selectedTaskRunId = null;
+let selectedIssueId = null;
 
 async function fetchJSON(url) {
   const res = await fetch(url);
@@ -70,14 +103,39 @@ async function fetchJSON(url) {
 
 async function refresh() {
   try {
-    const [issues, tasks, agents] = await Promise.all([
+    const [
+      issues,
+      taskruns,
+      agents,
+      runtimeMachines,
+      runtimeCapabilities,
+      runtimeLeases,
+      leaderDecisions,
+      agentProfiles,
+      skills,
+      benchmarkRuns,
+    ] = await Promise.all([
       fetchJSON('/api/issues'),
-      fetchJSON('/api/tasks'),
+      fetchJSON('/api/taskruns'),
       fetchJSON('/api/agents'),
+      fetchJSON('/api/runtime-machines'),
+      fetchJSON('/api/runtime-capabilities'),
+      fetchJSON('/api/runtime-leases'),
+      fetchJSON('/api/leader-decisions'),
+      fetchJSON('/api/agent-profiles'),
+      fetchJSON('/api/skills'),
+      fetchJSON('/api/benchmark-runs'),
     ]);
     renderIssues(issues);
-    renderTasks(tasks);
+    renderTaskRuns(taskruns);
     renderRoster(agents);
+    renderRuntimeMachines(runtimeMachines);
+    renderRuntimeCapabilities(runtimeCapabilities);
+    renderRuntimeLeases(runtimeLeases);
+    renderLeaderDecisions(leaderDecisions);
+    renderAgentProfiles(agentProfiles);
+    renderSkills(skills);
+    renderBenchmarkRuns(benchmarkRuns);
   } catch (e) {
     document.getElementById('issues').innerHTML = '<div class="empty">Failed to load. Is the API running?</div>';
   }
@@ -87,17 +145,89 @@ function renderIssues(issues) {
   const el = document.getElementById('issues');
   if (!issues.length) { el.innerHTML = '<div class="empty">No issues. Create one via CLI.</div>'; return; }
   el.innerHTML = issues.map(i =>
-    `<div class="item"><span class="badge ${i.status}">${i.status}</span> ${i.title}</div>`
+    `<div class="item ${i.id === selectedIssueId ? 'selected' : ''}" onclick="selectIssue('${i.id}')"><span class="badge ${i.status}">${i.status}</span> ${i.title}</div>`
   ).join('');
 }
 
-function renderTasks(tasks) {
-  const el = document.getElementById('tasks');
-  if (!tasks.length) { el.innerHTML = '<div class="empty">No tasks.</div>'; return; }
-  el.innerHTML = tasks.map(t =>
-    `<div class="item ${t.id === selectedTaskId ? 'selected' : ''}" onclick="selectTask('${t.id}')">
+async function selectIssue(issueId) {
+  selectedIssueId = issueId;
+  const el = document.getElementById('issue-timeline');
+  el.innerHTML = '<div class="empty">Loading IssueTimeline...</div>';
+  try {
+    const events = await fetchJSON(`/api/issues/${issueId}/timeline`);
+    if (!events.length) { el.innerHTML = '<div class="empty">No events recorded.</div>'; return; }
+    el.innerHTML = events.map(e =>
+      `<div class="timeline-event"><span class="time">${e.created_at}</span> <span class="event">[${e.event_type}]</span> ${e.taskrun_id ? 'taskrun=' + e.taskrun_id.slice(0,12) : ''}</div>`
+    ).join('');
+  } catch (e) {
+    el.innerHTML = '<div class="empty">Failed to load IssueTimeline.</div>';
+  }
+  refresh();
+}
+
+function renderTaskRuns(taskruns) {
+  const el = document.getElementById('taskruns');
+  if (!taskruns.length) { el.innerHTML = '<div class="empty">No TaskRuns.</div>'; return; }
+  el.innerHTML = taskruns.map(t =>
+    `<div class="item ${t.id === selectedTaskRunId ? 'selected' : ''}" onclick="selectTaskRun('${t.id}')">
       <span class="badge ${t.status}">${t.status}</span> ${t.id.slice(0,12)}... attempt=${t.attempt}
     </div>`
+  ).join('');
+}
+
+function renderRuntimeMachines(runtimeMachines) {
+  const el = document.getElementById('runtime-machines');
+  if (!runtimeMachines.length) { el.innerHTML = '<div class="empty">No RuntimeMachines.</div>'; return; }
+  el.innerHTML = runtimeMachines.map(r =>
+    `<div class="item"><span class="badge ${r.status}">${r.status}</span> ${r.id}<br><small>${r.workspace_root}</small></div>`
+  ).join('');
+}
+
+function renderRuntimeCapabilities(runtimeCapabilities) {
+  const el = document.getElementById('runtime-capabilities');
+  if (!runtimeCapabilities.length) { el.innerHTML = '<div class="empty">No RuntimeCapabilities.</div>'; return; }
+  el.innerHTML = runtimeCapabilities.map(c =>
+    `<div class="item"><span class="badge ${c.status}">${c.status}</span> ${c.provider}<br><small>${c.command_path || 'no command'}</small></div>`
+  ).join('');
+}
+
+function renderRuntimeLeases(runtimeLeases) {
+  const el = document.getElementById('runtime-leases');
+  if (!runtimeLeases.length) { el.innerHTML = '<div class="empty">No RuntimeLeases.</div>'; return; }
+  el.innerHTML = runtimeLeases.map(l =>
+    `<div class="item"><span class="badge ${l.status}">${l.status}</span> ${l.id}<br><small>taskrun=${l.taskrun_id.slice(0, 12)} runtime=${l.runtime_machine_id}</small></div>`
+  ).join('');
+}
+
+function renderLeaderDecisions(leaderDecisions) {
+  const el = document.getElementById('leader-decisions');
+  if (!leaderDecisions.length) { el.innerHTML = '<div class="empty">No LeaderDecisions.</div>'; return; }
+  el.innerHTML = leaderDecisions.map(d =>
+    `<div class="item"><span class="badge ${d.outcome}">${d.outcome}</span> issue=${d.issue_id}<br><small>${d.reason || 'no reason'}</small></div>`
+  ).join('');
+}
+
+function renderAgentProfiles(agentProfiles) {
+  const el = document.getElementById('agent-profiles');
+  if (!agentProfiles.length) { el.innerHTML = '<div class="empty">No AgentProfiles.</div>'; return; }
+  el.innerHTML = agentProfiles.map(p =>
+    `<div class="item"><span class="badge ${p.status}">${p.status}</span> ${p.name}<br><small>capabilities=${p.preferred_capabilities.join(', ') || 'none'} skills=${p.skills.join(', ') || 'none'}</small></div>`
+  ).join('');
+}
+
+function renderSkills(skills) {
+  const el = document.getElementById('skills');
+  if (!skills.length) { el.innerHTML = '<div class="empty">No Skills.</div>'; return; }
+  el.innerHTML = skills.map(s =>
+    `<div class="item">${s.name}<br><small>tools=${s.tools_allowed.join(', ') || 'none'} version=${s.version || 'unversioned'}</small></div>`
+  ).join('');
+}
+
+function renderBenchmarkRuns(benchmarkRuns) {
+  const el = document.getElementById('benchmark-runs');
+  if (!benchmarkRuns.length) { el.innerHTML = '<div class="empty">No BenchmarkRuns.</div>'; return; }
+  el.innerHTML = benchmarkRuns.map(b =>
+    `<div class="item"><span class="badge ${b.status}">${b.status}</span> ${b.suite_name}/${b.case_name}<br><small>success=${b.summary.success} taskruns=${b.metrics.taskrun_count || 0} leases=${b.metrics.runtime_lease_count || 0}</small></div>`
   ).join('');
 }
 
@@ -109,15 +239,15 @@ function renderRoster(agents) {
   ).join('');
 }
 
-async function selectTask(taskId) {
-  selectedTaskId = taskId;
+async function selectTaskRun(taskrunId) {
+  selectedTaskRunId = taskrunId;
   const el = document.getElementById('timeline');
   el.innerHTML = '<div class="empty">Loading...</div>';
   try {
-    const events = await fetchJSON(`/api/tasks/${taskId}/timeline`);
+    const events = await fetchJSON(`/api/taskruns/${taskrunId}/timeline`);
     if (!events.length) { el.innerHTML = '<div class="empty">No events recorded.</div>'; return; }
     el.innerHTML = events.map(e =>
-      `<div class="timeline-event"><span class="time">${e.created_at}</span> <span class="event">[${e.event}]</span> task=${e.task_id ? e.task_id.slice(0,12) : 'N/A'}</div>`
+      `<div class="timeline-event"><span class="time">${e.created_at}</span> <span class="event">[${e.event}]</span> taskrun=${e.task_id ? e.task_id.slice(0,12) : 'N/A'}</div>`
     ).join('');
   } catch (e) {
     el.innerHTML = '<div class="empty">Failed to load timeline.</div>';

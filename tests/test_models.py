@@ -39,6 +39,7 @@ from ariadne.models import (
 
 def test_task_status_values():
     assert TaskStatus.QUEUED.value == "queued"
+    assert TaskStatus.PREPARING.value == "preparing"
     assert TaskStatus.CLAIMED.value == "claimed"
     assert TaskStatus.RUNNING.value == "running"
     assert TaskStatus.COMPLETED.value == "completed"
@@ -46,10 +47,11 @@ def test_task_status_values():
     assert TaskStatus.CANCELLED.value == "cancelled"
 
 
-def test_task_status_has_exactly_six_members():
-    assert len(list(TaskStatus)) == 6
+def test_task_status_has_exactly_seven_members():
+    assert len(list(TaskStatus)) == 7
     assert {m.value for m in TaskStatus} == {
         "queued",
+        "preparing",
         "claimed",
         "running",
         "completed",
@@ -72,16 +74,18 @@ def test_failure_reason_values():
     assert FailureReason.RUNTIME_OFFLINE.value == "runtime_offline"
     assert FailureReason.RUNTIME_RECOVERY.value == "runtime_recovery"
     assert FailureReason.MANUAL.value == "manual"
+    assert FailureReason.POLICY_BLOCKED.value == "policy_blocked"
 
 
-def test_failure_reason_has_exactly_five_members():
-    assert len(list(FailureReason)) == 5
+def test_failure_reason_has_exactly_six_members():
+    assert len(list(FailureReason)) == 6
     assert {m.value for m in FailureReason} == {
         "agent_error",
         "timeout",
         "runtime_offline",
         "runtime_recovery",
         "manual",
+        "policy_blocked",
     }
 
 

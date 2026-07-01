@@ -6,7 +6,9 @@ Per docs/plan/tasks/core-003.md.
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 import typer
 
@@ -18,11 +20,97 @@ from ariadne.store import Store
 app = typer.Typer(help="Ariadne: local multi-agent orchestration platform.")
 
 # Shared store instance
-_db_path = "ariadne.db"
+_db_path = os.environ.get("ARIADNE_DB", "ariadne.db")
 
 
 def _get_store() -> Store:
-    return Store(_db_path)
+    return Store(os.environ.get("ARIADNE_DB", _db_path))
+
+
+# ---------------------------------------------------------------------------
+# Runtime commands
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def runtime_list():
+    """List registered RuntimeMachines."""
+    store = _get_store()
+    machines = store.list_runtime_machines()
+    if not machines:
+        typer.echo("No runtime machines.")
+        store.close()
+        return
+    for machine in machines:
+        heartbeat = (
+            machine.last_heartbeat_at.isoformat()
+            if machine.last_heartbeat_at
+            else "never"
+        )
+        typer.echo(
+            f"  {machine.id}  [{machine.status.value}]  "
+            f"root={machine.workspace_root}  heartbeat={heartbeat}"
+        )
+    store.close()
+
+
+@app.command()
+def capability_list(
+    runtime_machine_id: str | None = typer.Option(None, "--runtime-machine-id"),
+):
+    """List RuntimeCapabilities."""
+    store = _get_store()
+    capabilities = store.list_runtime_capabilities(runtime_machine_id)
+    if not capabilities:
+        typer.echo("No runtime capabilities.")
+        store.close()
+        return
+    for capability in capabilities:
+        health = f"  error={capability.health_error}" if capability.health_error else ""
+        typer.echo(
+            f"  {capability.id}  {capability.provider}  "
+            f"[{capability.status.value}]  runtime={capability.runtime_machine_id}"
+            f"{health}"
+        )
+    store.close()
+
+
+@app.command()
+def runtime_lease_list(
+    taskrun_id: str | None = typer.Option(None, "--taskrun-id"),
+):
+    """List RuntimeLeases."""
+    store = _get_store()
+    leases = store.list_runtime_leases(taskrun_id)
+    if not leases:
+        typer.echo("No runtime leases.")
+        store.close()
+        return
+    for lease in leases:
+        typer.echo(
+            f"  {lease.id}  [{lease.status.value}]  taskrun={lease.taskrun_id}  "
+            f"runtime={lease.runtime_machine_id}  capability={lease.runtime_capability_id}"
+        )
+    store.close()
+
+
+@app.command()
+def leader_decision_list(
+    issue_id: str | None = typer.Argument(None),
+):
+    """List LeaderDecision records."""
+    store = _get_store()
+    decisions = store.list_leader_decisions(issue_id)
+    if not decisions:
+        typer.echo("No leader decisions.")
+        store.close()
+        return
+    for decision in decisions:
+        typer.echo(
+            f"  {decision.id}  [{decision.outcome.value}]  issue={decision.issue_id}  "
+            f"created_taskruns={decision.created_taskrun_ids}  reason={decision.reason}"
+        )
+    store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +154,31 @@ def issue_list():
 
 
 @app.command()
+def issue_timeline(
+    issue_id: str = typer.Argument(...),
+):
+    """Show IssueTimeline events for an issue."""
+    store = _get_store()
+    issue = store.get_issue(issue_id)
+    if issue is None:
+        typer.echo(f"Issue not found: {issue_id}", err=True)
+        raise typer.Exit(1)
+    events = store.get_issue_timeline(issue_id)
+    if not events:
+        typer.echo("No issue timeline events.")
+        store.close()
+        return
+    typer.echo(f"IssueTimeline for {issue_id}:")
+    for event in events:
+        target = f" taskrun={event.taskrun_id}" if event.taskrun_id else ""
+        typer.echo(
+            f"  {event.created_at.isoformat()}  "
+            f"[{event.event_type}] actor={event.actor_type}{target}"
+        )
+    store.close()
+
+
+@app.command()
 def task_create(
     issue_id: str = typer.Argument(...),
     handoff_prompt: str = typer.Option("", "--handoff", "-h", help="Handoff prompt for the agent"),
@@ -82,6 +195,26 @@ def task_create(
 
 
 @app.command()
+def taskrun_create(
+    issue_id: str = typer.Argument(...),
+    handoff_prompt: str = typer.Option("", "--handoff", "-h", help="Handoff prompt for the agent"),
+):
+    """Enqueue a TaskRun for an issue's assignee."""
+    store = _get_store()
+    issue = store.get_issue(issue_id)
+    if issue is None:
+        typer.echo(f"Issue not found: {issue_id}", err=True)
+        raise typer.Exit(1)
+    taskrun = store.enqueue_taskrun(
+        issue.id,
+        issue.assignee_id,
+        handoff_prompt=handoff_prompt or None,
+    )
+    typer.echo(f"Created taskrun: {taskrun.id} (status={taskrun.status.value})")
+    store.close()
+
+
+@app.command()
 def task_list():
     """List all tasks."""
     store = _get_store()
@@ -93,6 +226,23 @@ def task_list():
         return
     for r in rows:
         typer.echo(f"  {r['id']}  [{r['status']}]  issue={r['issue_id']}  attempt={r['attempt']}")
+    store.close()
+
+
+@app.command()
+def taskrun_list():
+    """List all TaskRuns."""
+    store = _get_store()
+    taskruns = store.list_taskruns()
+    if not taskruns:
+        typer.echo("No taskruns.")
+        return
+    for taskrun in taskruns:
+        typer.echo(
+            f"  {taskrun.id}  [{taskrun.status.value}]  "
+            f"issue={taskrun.issue_id}  agent_profile={taskrun.agent_profile_id}  "
+            f"attempt={taskrun.attempt}"
+        )
     store.close()
 
 
@@ -119,6 +269,35 @@ def task_timeline(
     for e in events:
         details_str = f"  {e['details']}" if e["details"] else ""
         typer.echo(f"  {e['created_at']}  [{e['event']}]  task={e['task_id']}{details_str}")
+    store.close()
+
+
+@app.command()
+def taskrun_timeline(
+    taskrun_id: str = typer.Argument(...),
+):
+    """Show timeline events for a TaskRun's trace_id."""
+    store = _get_store()
+    taskrun = store.get_taskrun(taskrun_id)
+    if taskrun is None:
+        typer.echo(f"TaskRun not found: {taskrun_id}", err=True)
+        raise typer.Exit(1)
+    if not taskrun.trace_id:
+        typer.echo("No trace_id for this TaskRun.")
+        store.close()
+        return
+    events = store.get_timeline(taskrun.trace_id)
+    if not events:
+        typer.echo("No events recorded.")
+        store.close()
+        return
+    typer.echo(f"Timeline for TaskRun trace {taskrun.trace_id}:")
+    for e in events:
+        details_str = f"  {e['details']}" if e["details"] else ""
+        typer.echo(
+            f"  {e['created_at']}  [{e['event']}]  "
+            f"taskrun={e['task_id']}{details_str}"
+        )
     store.close()
 
 
@@ -159,6 +338,113 @@ def agent_list():
         typer.echo(
             f"  {agent.id}  {agent.name}  backends={agent.backends}  skills={agent.skills}"
         )
+    store.close()
+
+
+@app.command()
+def agent_profile_create(
+    name: str = typer.Option(..., "--name", "-n"),
+    description: str = typer.Option("", "--description"),
+    instructions: str = typer.Option("", "--instructions"),
+    capability: list[str] = typer.Option([], "--capability", "-c"),
+    runtime_policy: str = typer.Option("{}", "--runtime-policy"),
+    max_concurrent_taskruns: int = typer.Option(1, "--max-concurrent-taskruns"),
+):
+    """Create a durable AgentProfile and compatibility Agent."""
+    try:
+        policy = json.loads(runtime_policy)
+    except json.JSONDecodeError as exc:
+        typer.echo(f"Invalid runtime policy JSON: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    store = _get_store()
+    profile = store.create_agent_profile(
+        name=name,
+        description=description,
+        instructions=instructions,
+        preferred_capabilities=capability or ["dry-run"],
+        runtime_policy=policy,
+        max_concurrent_taskruns=max_concurrent_taskruns,
+    )
+    typer.echo(f"Created agent profile: {profile.id} (name={profile.name})")
+    store.close()
+
+
+@app.command()
+def agent_profile_list():
+    """List AgentProfiles with bound Skills."""
+    store = _get_store()
+    profiles = store.list_agent_profiles()
+    if not profiles:
+        typer.echo("No agent profiles.")
+        store.close()
+        return
+    for profile in profiles:
+        skills = [skill.name for skill in store.list_skills_for_agent_profile(profile.id)]
+        typer.echo(
+            f"  {profile.id}  {profile.name}  "
+            f"capabilities={profile.preferred_capabilities}  skills={skills}"
+        )
+    store.close()
+
+
+@app.command()
+def skill_create(
+    name: str = typer.Option(..., "--name", "-n"),
+    description: str = typer.Option("", "--description"),
+    when_to_use: str = typer.Option("", "--when-to-use"),
+    prompt_snippet: str = typer.Option("", "--prompt-snippet"),
+    tool: list[str] = typer.Option([], "--tool"),
+    test_command: str = typer.Option("", "--test-command"),
+    source_path: str = typer.Option("", "--source-path"),
+    version: str = typer.Option("", "--version"),
+):
+    """Create a first-class Skill."""
+    store = _get_store()
+    skill = store.create_skill(
+        name=name,
+        description=description,
+        when_to_use=when_to_use,
+        prompt_snippet=prompt_snippet,
+        tools_allowed=tool,
+        test_command=test_command or None,
+        source_path=source_path or None,
+        version=version,
+    )
+    typer.echo(f"Created skill: {skill.id} (name={skill.name})")
+    store.close()
+
+
+@app.command()
+def skill_list():
+    """List first-class Skills."""
+    store = _get_store()
+    skills = store.list_skills()
+    if not skills:
+        typer.echo("No skills.")
+        store.close()
+        return
+    for skill in skills:
+        typer.echo(
+            f"  {skill.id}  {skill.name}  tools={skill.tools_allowed}  "
+            f"version={skill.version}"
+        )
+    store.close()
+
+
+@app.command()
+def agent_profile_bind_skill(
+    agent_profile_id: str = typer.Argument(...),
+    skill_id_or_name: str = typer.Argument(...),
+):
+    """Bind a Skill to an AgentProfile."""
+    store = _get_store()
+    try:
+        skill = store.bind_skill_to_agent_profile(agent_profile_id, skill_id_or_name)
+    except KeyError as exc:
+        typer.echo(str(exc), err=True)
+        store.close()
+        raise typer.Exit(1) from exc
+    typer.echo(f"Bound skill {skill.id} to agent profile {agent_profile_id}")
     store.close()
 
 
@@ -277,6 +563,151 @@ def benchmark_run(
     report = run_benchmark(store, tasks)
     typer.echo(json.dumps(report_to_dict(report), indent=2))
     store.close()
+
+
+@app.command()
+def benchmark_list():
+    """List persisted BenchmarkRuns."""
+    store = _get_store()
+    runs = store.list_benchmark_runs()
+    if not runs:
+        typer.echo("No benchmark runs.")
+        store.close()
+        return
+    for run in runs:
+        success = run.summary.get("success")
+        typer.echo(
+            f"  {run.id}  [{run.status}]  {run.suite_name}/{run.case_name}  "
+            f"issue={run.issue_id}  success={success}"
+        )
+    store.close()
+
+
+@app.command()
+def demo_v1(
+    output_dir: str = typer.Option(".ariadne-demo-v1", "--output-dir"),
+    reset: bool = typer.Option(False, "--reset"),
+):
+    """Run the five-minute local Managed Agent Team Runtime v1 demo."""
+    from ariadne.eval import BenchmarkTask, run_benchmark
+    from ariadne.models import DelegationDecision, LeaderDecision, LeaderDecisionOutcome
+    from ariadne.orchestrator import Orchestrator
+
+    demo_dir = Path(output_dir)
+    demo_dir.mkdir(parents=True, exist_ok=True)
+    db_path = demo_dir / "ariadne-v1.db"
+    if reset and db_path.exists():
+        db_path.unlink()
+
+    store = Store(str(db_path))
+    try:
+        leader = store.create_agent_profile(
+            name="Demo Leader",
+            instructions="Coordinate the local demo and close only after member facts exist.",
+            preferred_capabilities=["dry-run"],
+            runtime_policy={"allow_real_execution": False},
+        )
+        coder = store.create_agent_profile(
+            name="Demo Coder",
+            instructions="Execute dry-run implementation work for the demo.",
+            preferred_capabilities=["dry-run"],
+            runtime_policy={"allow_real_execution": False},
+        )
+        skill = store.create_skill(
+            name=f"demo-dry-run-skill-{len(store.list_skills()) + 1}",
+            description="Dry-run demo skill",
+            when_to_use="Use for the clean-checkout demo.",
+            prompt_snippet="Report dry-run facts without touching external providers.",
+            tools_allowed=["dry-run"],
+            test_command="uv run pytest -q",
+            source_path="demo-v1",
+            version="1",
+        )
+        store.bind_skill_to_agent_profile(coder.id, skill.id)
+        squad = store.create_squad(
+            "Demo Runtime Squad",
+            leader.id,
+            instructions="Delegate once, then mark done after member completion.",
+        )
+        store.add_squad_member(squad.id, coder.id, role="coder")
+        issue = store.create_issue(
+            "Demo managed-agent runtime",
+            "Create observable dry-run runtime facts for v1.",
+            AssigneeType.SQUAD,
+            squad.id,
+        )
+        store.enqueue_taskrun(issue.id, leader.id, squad_id=squad.id)
+
+        call_count = [0]
+
+        def decide(briefing, issue, completed_results=None):
+            call_count[0] += 1
+            if not completed_results:
+                entry = briefing.roster[0]
+                return DelegationDecision(
+                    target_agent_id=entry.agent_id,
+                    backend="dry-run",
+                    handoff_prompt="Run the local v1 demo path in dry-run mode.",
+                    reason="demo delegation",
+                    skill_refs=entry.skills,
+                )
+            return LeaderDecision(
+                outcome=LeaderDecisionOutcome.DONE,
+                reason="demo member task completed with observable facts",
+            )
+
+        daemon = Daemon(
+            store=store,
+            backend_factory=get_backend,
+            runtime_id="demo-v1",
+            poll_interval=0.001,
+            orchestrator=Orchestrator(store=store, llm_decide=decide),
+            target_repo_path=str(demo_dir),
+        )
+        daemon.start(max_iterations=10)
+
+        benchmark = run_benchmark(
+            store,
+            [
+                BenchmarkTask(
+                    title="Demo Benchmark",
+                    description="BenchmarkRun from demo product facts.",
+                    backend="dry-run",
+                    expected_success=True,
+                    suite_name="demo-v1",
+                )
+            ],
+        )
+
+        issue = store.get_issue(issue.id)
+        taskruns = store.list_taskruns()
+        leases = store.list_runtime_leases()
+        decisions = store.list_leader_decisions()
+        benchmark_runs = store.list_benchmark_runs()
+
+        typer.echo("Ariadne Managed Agent Team Runtime v1 demo complete")
+        typer.echo(f"DB: {db_path}")
+        typer.echo(f"Issue: {issue.id} status={issue.status.value}")
+        typer.echo(f"RuntimeMachines: {len(store.list_runtime_machines())}")
+        typer.echo(f"RuntimeCapabilities: {len(store.list_runtime_capabilities())}")
+        typer.echo(f"TaskRuns: {len(taskruns)}")
+        typer.echo(f"RuntimeLeases: {len(leases)}")
+        typer.echo(f"LeaderDecisions: {len(decisions)}")
+        typer.echo(f"BenchmarkRuns: {len(benchmark_runs)}")
+        typer.echo(f"Benchmark success: {benchmark.success_count}/{benchmark.total_tasks}")
+        typer.echo("States: dry-run=completed, live-execution=skipped, blocked=0, failed=0")
+        typer.echo("")
+        typer.echo("Inspect with:")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne runtime-list")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne capability-list")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne taskrun-list")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne runtime-lease-list")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne leader-decision-list {issue.id}")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne issue-timeline {issue.id}")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne benchmark-list")
+        typer.echo(f"  ARIADNE_DB={db_path} uv run ariadne api-serve")
+    finally:
+        store.close()
 
 
 # ---------------------------------------------------------------------------

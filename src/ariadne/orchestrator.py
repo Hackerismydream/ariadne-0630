@@ -14,7 +14,17 @@ import logging
 from typing import Callable
 
 from ariadne.briefing import generate_briefing
-from ariadne.models import DelegationDecision, FailureReason, Issue, IssueStatus, SquadBriefing, Task, TaskStatus
+from ariadne.models import (
+    DelegationDecision,
+    FailureReason,
+    Issue,
+    IssueStatus,
+    LeaderDecision,
+    LeaderDecisionOutcome,
+    SquadBriefing,
+    Task,
+    TaskStatus,
+)
 from ariadne.store import Store
 
 logger = logging.getLogger(__name__)
@@ -55,7 +65,10 @@ class Orchestrator:
     def __init__(
         self,
         store: Store,
-        llm_decide: Callable[[SquadBriefing, Issue], DelegationDecision | None] | None = None,
+        llm_decide: Callable[
+            [SquadBriefing, Issue], DelegationDecision | LeaderDecision | None
+        ]
+        | None = None,
     ):
         self.store = store
         self.llm_decide = llm_decide or deterministic_decide
@@ -64,9 +77,10 @@ class Orchestrator:
         """Process one leader activation.
 
         1. Load squad + generate briefing
-        2. Call llm_decide → DelegationDecision or None
-        3. If DelegationDecision: validate, create child task
-        4. If None: mark issue as done
+        2. Call llm_decide → DelegationDecision, LeaderDecision, or legacy None
+        3. Record a LeaderDecision fact for action/no_action/failed/done
+        4. If action: validate, create child TaskRun
+        5. If done: close the Issue
         5. Mark leader task completed
         """
         # Reload from store to get the latest status (may have been claimed by daemon)
@@ -99,48 +113,100 @@ class Orchestrator:
         # Gather completed member results for re-evaluation context
         completed_results = self._gather_completed_results(task.squad_id, issue.id)
 
-        decision = self.llm_decide(briefing, issue, completed_results)
+        raw_decision = self.llm_decide(briefing, issue, completed_results)
+        decision = self._coerce_leader_decision(
+            raw_decision, completed_results=completed_results
+        )
 
-        if decision is None:
-            # Leader decided no more work needed → mark issue done
-            logger.info("leader decided no delegation — marking issue %s done", issue.id)
-            self.store.update_issue_status(issue.id, IssueStatus.DONE)
-        else:
-            # Validate delegation
-            error = self._validate_delegation(decision, briefing)
-            if error:
-                logger.error("delegation validation failed: %s", error)
-                if task.status == TaskStatus.CLAIMED:
-                    self.store.start_task(task.id)
-                self.store.fail_task(task.id, error, FailureReason.AGENT_ERROR)
+        if decision.outcome == LeaderDecisionOutcome.ACTION:
+            delegation = self._delegation_from_leader_decision(decision)
+            if delegation is None:
+                self._record_failed_turn(
+                    task,
+                    issue,
+                    "action decision missing delegation payload",
+                )
                 return
 
-            # Create child task for the member — inherit leader's trace_id
-            child = self.store.enqueue_task(
+            error = self._validate_delegation(delegation, briefing)
+            if error:
+                logger.error("delegation validation failed: %s", error)
+                self._record_failed_turn(task, issue, error)
+                return
+
+            child = self.store.enqueue_taskrun(
                 issue_id=issue.id,
-                agent_id=decision.target_agent_id,
+                agent_profile_id=delegation.target_agent_id,
                 squad_id=task.squad_id,
-                handoff_prompt=decision.handoff_prompt,
+                handoff_prompt=delegation.handoff_prompt,
                 trace_id=task.trace_id,
             )
-            self.store.log_activity(
-                task.trace_id, child.id, "delegated",
-                {"to_agent": decision.target_agent_id, "backend": decision.backend},
+            record = self.store.record_leader_decision(
+                issue_id=issue.id,
+                squad_id=task.squad_id,
+                leader_task_id=task.id,
+                outcome=LeaderDecisionOutcome.ACTION,
+                reason=decision.reason or delegation.reason,
+                delegation_payload=delegation.model_dump(),
+                created_taskrun_ids=[child.id],
             )
+            if task.trace_id:
+                self.store.log_activity(
+                    task.trace_id,
+                    child.id,
+                    "delegated",
+                    {"to_agent": delegation.target_agent_id, "backend": delegation.backend},
+                )
             logger.info(
                 "leader delegated to agent %s via backend %s, child task %s (trace=%s)",
-                decision.target_agent_id,
-                decision.backend,
+                delegation.target_agent_id,
+                delegation.backend,
                 child.id,
                 task.trace_id,
             )
+            self._complete_leader_task(task.id, record)
+            return
 
-        # Mark leader task completed (task should already be running —
-        # the daemon claims+starts before calling handle_leader_task.
-        # Only start if still in claimed state.)
-        if task.status == TaskStatus.CLAIMED:
-            self.store.start_task(task.id)
-        self.store.complete_task(task.id, {"delegation": decision.model_dump() if decision else None})
+        if decision.outcome == LeaderDecisionOutcome.NO_ACTION:
+            record = self.store.record_leader_decision(
+                issue_id=issue.id,
+                squad_id=task.squad_id,
+                leader_task_id=task.id,
+                outcome=LeaderDecisionOutcome.NO_ACTION,
+                reason=decision.reason,
+                delegation_payload=decision.delegation_payload,
+                created_taskrun_ids=[],
+            )
+            self._complete_leader_task(task.id, record)
+            return
+
+        if decision.outcome == LeaderDecisionOutcome.FAILED:
+            self._record_failed_turn(
+                task,
+                issue,
+                decision.reason or "leader coordination failed",
+                delegation_payload=decision.delegation_payload,
+            )
+            return
+
+        if decision.outcome == LeaderDecisionOutcome.DONE:
+            payload = dict(decision.delegation_payload)
+            payload.setdefault(
+                "issue_timeline_event_count",
+                len(self.store.get_issue_timeline(issue.id)),
+            )
+            record = self.store.record_leader_decision(
+                issue_id=issue.id,
+                squad_id=task.squad_id,
+                leader_task_id=task.id,
+                outcome=LeaderDecisionOutcome.DONE,
+                reason=decision.reason,
+                delegation_payload=payload,
+                created_taskrun_ids=[],
+            )
+            self.store.update_issue_status(issue.id, IssueStatus.DONE)
+            self._complete_leader_task(task.id, record)
+            return
 
     def on_member_task_complete(self, task: Task) -> None:
         """Event loop callback when a member task reaches terminal state.
@@ -171,9 +237,9 @@ class Orchestrator:
                 # Issue already done — no need to re-activate leader
                 return
 
-            leader_task = self.store.enqueue_task(
+            leader_task = self.store.enqueue_taskrun(
                 issue_id=task.issue_id,
-                agent_id=squad.leader_id,
+                agent_profile_id=squad.leader_id,
                 squad_id=task.squad_id,
                 trace_id=task.trace_id,
             )
@@ -230,3 +296,78 @@ class Orchestrator:
                 "error": r["error"],
             })
         return results
+
+    def _coerce_leader_decision(
+        self,
+        raw_decision: object,
+        completed_results: list[dict],
+    ) -> LeaderDecision:
+        """Accept legacy decider output while making the stored outcome explicit."""
+        if isinstance(raw_decision, LeaderDecision):
+            return raw_decision
+        if isinstance(raw_decision, DelegationDecision):
+            return LeaderDecision(
+                outcome=LeaderDecisionOutcome.ACTION,
+                reason=raw_decision.reason,
+                delegation_payload=raw_decision.model_dump(),
+            )
+        if raw_decision is None:
+            reason = (
+                "completed member work satisfied the issue"
+                if completed_results
+                else "legacy decider returned no delegation"
+            )
+            return LeaderDecision(outcome=LeaderDecisionOutcome.DONE, reason=reason)
+        return LeaderDecision(
+            outcome=LeaderDecisionOutcome.FAILED,
+            reason=f"unsupported leader decision output: {type(raw_decision).__name__}",
+            delegation_payload={"raw": repr(raw_decision)},
+        )
+
+    def _delegation_from_leader_decision(
+        self, decision: LeaderDecision
+    ) -> DelegationDecision | None:
+        if not decision.delegation_payload:
+            return None
+        try:
+            return DelegationDecision(**decision.delegation_payload)
+        except Exception as exc:
+            logger.error("invalid action delegation payload: %s", exc)
+            return None
+
+    def _record_failed_turn(
+        self,
+        task: Task,
+        issue: Issue,
+        reason: str,
+        delegation_payload: dict | None = None,
+    ) -> None:
+        if task.squad_id is None:
+            return
+        record = self.store.record_leader_decision(
+            issue_id=issue.id,
+            squad_id=task.squad_id,
+            leader_task_id=task.id,
+            outcome=LeaderDecisionOutcome.FAILED,
+            reason=reason,
+            delegation_payload=delegation_payload or {},
+            created_taskrun_ids=[],
+        )
+        self._ensure_leader_started(task.id)
+        self.store.fail_task(
+            task.id,
+            f"leader decision {record.id}: {reason}",
+            FailureReason.AGENT_ERROR,
+        )
+
+    def _complete_leader_task(self, task_id: str, record: LeaderDecision) -> None:
+        self._ensure_leader_started(task_id)
+        self.store.complete_task(
+            task_id,
+            {"leader_decision": record.model_dump(mode="json")},
+        )
+
+    def _ensure_leader_started(self, task_id: str) -> None:
+        latest = self.store.get_task(task_id)
+        if latest and latest.status in (TaskStatus.PREPARING, TaskStatus.CLAIMED):
+            self.store.start_task(task_id)

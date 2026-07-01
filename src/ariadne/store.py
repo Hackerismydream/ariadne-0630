@@ -183,7 +183,7 @@ CREATE TABLE IF NOT EXISTS task (
     parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
     failure_reason TEXT
         CHECK (failure_reason IS NULL OR failure_reason IN
-               ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery', 'manual')),
+               ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery', 'manual', 'policy_blocked')),
     dispatched_at TEXT,
     started_at TEXT,
     completed_at TEXT,
@@ -674,6 +674,12 @@ class Store:
             ).fetchall()
         return [self._row_to_runtime_capability(r) for r in rows]
 
+    def get_runtime_capability(self, capability_id: str) -> RuntimeCapability | None:
+        row = self._conn.execute(
+            "SELECT * FROM runtime_capability WHERE id = ?", (capability_id,)
+        ).fetchone()
+        return self._row_to_runtime_capability(row) if row else None
+
     def set_runtime_capability_status(
         self,
         capability_id: str,
@@ -704,21 +710,49 @@ class Store:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                capability = self._conn.execute(
-                    """SELECT * FROM runtime_capability
-                       WHERE runtime_machine_id = ? AND status = 'available'
-                       ORDER BY provider LIMIT 1""",
-                    (runtime_machine_id,),
-                ).fetchone()
-                if capability is None:
-                    self._conn.execute("COMMIT")
-                    return None
-                task = self._conn.execute(
+                queued_tasks = self._conn.execute(
                     """SELECT * FROM task
                        WHERE status = 'queued'
-                       ORDER BY created_at LIMIT 1""",
-                ).fetchone()
-                if task is None:
+                       ORDER BY created_at"""
+                ).fetchall()
+                if not queued_tasks:
+                    self._conn.execute("COMMIT")
+                    return None
+                capabilities = self._conn.execute(
+                    """SELECT * FROM runtime_capability
+                       WHERE runtime_machine_id = ? AND status = 'available'
+                       ORDER BY provider""",
+                    (runtime_machine_id,),
+                ).fetchall()
+                task = None
+                capability = None
+                for candidate in queued_tasks:
+                    agent = self._conn.execute(
+                        "SELECT * FROM agent WHERE id = ?", (candidate["agent_id"],)
+                    ).fetchone()
+                    desired = (
+                        json.loads(agent["backends"])
+                        if agent and agent["backends"]
+                        else ["dry-run"]
+                    )
+                    for provider in desired or ["dry-run"]:
+                        capability = next(
+                            (
+                                cap
+                                for cap in capabilities
+                                if cap["provider"] == provider
+                            ),
+                            None,
+                        )
+                        if capability is not None:
+                            task = candidate
+                            break
+                    if capability is None and capabilities:
+                        capability = capabilities[0]
+                        task = candidate
+                    if task is not None:
+                        break
+                if task is None or capability is None:
                     self._conn.execute("COMMIT")
                     return None
                 now_dt = datetime.now(timezone.utc)

@@ -51,6 +51,7 @@ class FailureReason(str, Enum):
     RUNTIME_OFFLINE = "runtime_offline"
     RUNTIME_RECOVERY = "runtime_recovery"
     MANUAL = "manual"
+    POLICY_BLOCKED = "policy_blocked"
 
 
 class AssigneeType(str, Enum):
@@ -102,6 +103,17 @@ class LeaderDecisionOutcome(str, Enum):
     NO_ACTION = "no_action"
     FAILED = "failed"
     DONE = "done"
+
+
+class ExecutionPolicyLayer(str, Enum):
+    """Layer that allowed or blocked execution."""
+
+    RUNTIME_LEASE = "runtime_lease"
+    RUNTIME_MACHINE = "runtime_machine"
+    RUNTIME_CAPABILITY = "runtime_capability"
+    AGENT_PROFILE = "agent_profile"
+    SKILL = "skill"
+    TASKRUN = "taskrun"
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +394,15 @@ class ExecutionContext(BaseModel):
     model: str | None = None
     effort: str | None = None
     trace_id: str | None = None
+
+
+class ExecutionPolicyDecision(BaseModel):
+    """Result of the layered execution policy gate."""
+
+    allowed: bool
+    layer: ExecutionPolicyLayer | None = None
+    reason: str = ""
+    details: dict = Field(default_factory=dict)
 
 
 class ExecutionResult(BaseModel):

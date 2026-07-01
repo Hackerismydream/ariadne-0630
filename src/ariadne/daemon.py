@@ -24,6 +24,7 @@ from ariadne.models import (
     Task,
     TaskStatus,
 )
+from ariadne.policy import evaluate_execution_policy
 from ariadne.store import MaxAttemptsExhausted, Store
 
 logger = logging.getLogger(__name__)
@@ -184,7 +185,7 @@ class Daemon:
         agent_name = agent.name if agent else "unknown"
         instructions = agent.instructions if agent else ""
 
-        self.store.start_task(task.id)  # claimed → running
+        task = self.store.start_task(task.id)  # claimed/preparing → running
         if task.trace_id:
             self.store.log_activity(task.trace_id, task.id, "started", {"backend": agent.backends[0] if agent and agent.backends else "dry-run"})
 
@@ -208,6 +209,40 @@ class Daemon:
             confirm_execution=True,
             trace_id=task.trace_id,
         )
+
+        policy = evaluate_execution_policy(
+            self.store,
+            task=task,
+            context=context,
+            backend_name=backend_name,
+            runtime_id=self.runtime_id,
+        )
+        if not policy.allowed:
+            self.store.append_issue_timeline_event(
+                task.issue_id,
+                "execution_policy_blocked",
+                actor_type="runtime",
+                actor_id=self.runtime_id,
+                taskrun_id=task.id,
+                payload=policy.model_dump(mode="json"),
+            )
+            self.store.fail_task(task.id, policy.reason, FailureReason.POLICY_BLOCKED)
+            self._release_active_lease(task.id)
+            if task.trace_id:
+                self.store.log_activity(
+                    task.trace_id,
+                    task.id,
+                    "policy_blocked",
+                    policy.model_dump(mode="json"),
+                )
+            logger.warning(
+                "task %s blocked by execution policy layer %s: %s",
+                task.id,
+                policy.layer.value if policy.layer else "unknown",
+                policy.reason,
+            )
+            self._trigger_event_loop(task)
+            return
 
         try:
             result = backend.execute(context, on_progress=self._on_progress)
@@ -253,6 +288,10 @@ class Daemon:
 
     def _maybe_retry(self, task: Task) -> None:
         """Retry if attempts remain."""
+        latest = self.store.get_task(task.id)
+        if latest and latest.failure_reason == FailureReason.POLICY_BLOCKED:
+            logger.info("task %s: policy blocked, no retry", task.id)
+            return
         if task.attempt < task.max_attempts:
             try:
                 retried = self.store.retry_task(task.id)

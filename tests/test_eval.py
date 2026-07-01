@@ -5,6 +5,7 @@ Per docs/plan/tasks/eval-001.md "test_eval.py must cover".
 
 import pytest
 
+from ariadne.backends import DryRunBackend, register_backend
 from ariadne.eval import (
     BenchmarkTask,
     evaluate_task,
@@ -171,21 +172,28 @@ def test_single_vs_squad_compare_labels_dry_run_as_simulated(store):
     assert result["squad"]["success"] is True
 
 
-def test_single_vs_squad_compare_blocks_real_backend_without_gate(store, monkeypatch):
-    """real backend comparison is truthful when external execution is disabled."""
+def test_single_vs_squad_compare_runs_registered_backend_without_env_gate(store, monkeypatch):
+    """non-dry backend comparison no longer uses the old env confirmation gate."""
+    class CompareBackend(DryRunBackend):
+        name = "compare-isolation-test"
+
+    try:
+        register_backend(CompareBackend())
+    except ValueError:
+        pass
     monkeypatch.delenv("ARIADNE_ENABLE_EXTERNAL_EXECUTION", raising=False)
 
     result = run_single_vs_squad(
         store,
         num_member_tasks=2,
-        backend="codex",
+        backend="compare-isolation-test",
         max_concurrent=4,
     )
 
-    assert result["backend"] == "codex"
+    assert result["backend"] == "compare-isolation-test"
     assert result["simulated"] is False
-    assert result["status"] == "blocked"
+    assert result["status"] == "completed"
     assert result["max_concurrent"] == 2
-    assert "ARIADNE_ENABLE_EXTERNAL_EXECUTION" in result["blocked_reason"]
-    assert result["single"]["success"] is False
-    assert result["squad"]["success"] is False
+    assert "blocked_reason" not in result
+    assert result["single"]["success"] is True
+    assert result["squad"]["success"] is True

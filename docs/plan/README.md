@@ -16,7 +16,7 @@ mergeable — after each phase ships, the system is in a usable state.
 | squad-002 | pending | orchestrator.py (leader delegation + event loop) |
 | squad-003 | pending | LangGraph supervisor graph integration |
 | backend-001 | pending | backends.py (ExecutionBackend protocol + Codex + Claude) |
-| backend-002 | pending | Safety gate + diff capture + progress reporting |
+| backend-002 | pending | Isolation gate + diff capture + progress reporting |
 | eval-001 | pending | Evaluation layer (LLM-as-judge + benchmark harness) |
 | polish-001 | pending | CLI commands + README + architecture diagram |
 | polish-002 | pending | Test coverage gap fill + benchmark data collection |
@@ -52,7 +52,7 @@ event loop handles member completion correctly with real execution latency.
 **Tasks**: backend-001, backend-002
 **Depends on**: Phase 2 complete
 **Done when**: both backends execute real code changes in a test repo,
-retry works on injected failures, safety gates block unauthorized execution.
+retry works on injected failures, isolation gates prevent accidental target writes.
 
 ### Phase 4 (W4): Evaluation + Polish + Benchmark
 

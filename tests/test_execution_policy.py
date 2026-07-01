@@ -9,6 +9,7 @@ from ariadne.backends import get_backend
 from ariadne.daemon import Daemon
 from ariadne.models import (
     AssigneeType,
+    ExecutionResult,
     FailureReason,
     RuntimeCapabilityStatus,
     TaskStatus,
@@ -36,6 +37,34 @@ class ExplodingBackend:
     def execute(self, ctx, on_progress=None):
         self.calls += 1
         raise AssertionError("policy-blocked backend must not execute")
+
+
+class SuccessfulCodexBackend:
+    name = "codex"
+    executable_name = "codex"
+
+    def __init__(self):
+        self.calls = 0
+
+    def is_available(self):
+        return True
+
+    def execute(self, ctx, on_progress=None):
+        self.calls += 1
+        return ExecutionResult(
+            backend_name="codex",
+            success=True,
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            diff=None,
+            changed_files=[],
+            failure_reason=None,
+            duration_seconds=0.01,
+            command="codex",
+            command_cwd=ctx.target_repo_path,
+            execution_repo_path=ctx.target_repo_path,
+        )
 
 
 def _register_real_runtime(store: Store, runtime_id: str, target: Path):
@@ -173,8 +202,9 @@ def test_runtime_lease_policy_blocks_expired_lease(store, tmp_path):
     assert _policy_event(store, issue.id).payload["layer"] == "runtime_lease"
 
 
-def test_taskrun_policy_blocks_real_execution_without_environment_grant(store, tmp_path):
-    backend = ExplodingBackend()
+def test_taskrun_policy_no_longer_requires_environment_or_confirmation_gate(store, tmp_path, monkeypatch):
+    backend = SuccessfulCodexBackend()
+    monkeypatch.delenv("ARIADNE_ENABLE_EXTERNAL_EXECUTION", raising=False)
     _register_real_runtime(store, "rt-policy", tmp_path)
     _, issue, taskrun = _seed_codex_taskrun(
         store,
@@ -184,11 +214,15 @@ def test_taskrun_policy_blocks_real_execution_without_environment_grant(store, t
 
     _execute_with_policy(store, taskrun, tmp_path, backend)
 
-    failed = store.get_taskrun(taskrun.id)
-    assert failed.status == TaskStatus.FAILED
-    assert failed.failure_reason == FailureReason.POLICY_BLOCKED
-    assert backend.calls == 0
-    assert _policy_event(store, issue.id).payload["layer"] == "taskrun"
+    completed = store.get_taskrun(taskrun.id)
+    assert completed.status == TaskStatus.COMPLETED
+    assert completed.failure_reason is None
+    assert backend.calls == 1
+    assert not [
+        event
+        for event in store.get_issue_timeline(issue.id)
+        if event.event_type == "execution_policy_blocked"
+    ]
 
 
 def test_store_migrates_legacy_task_constraints(tmp_path):

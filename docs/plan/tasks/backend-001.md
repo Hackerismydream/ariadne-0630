@@ -9,7 +9,7 @@ depends-on: [squad-003]
 Implement real CodexBackend and ClaudeBackend in `src/ariadne/backends.py`,
 replacing the stub registry. These backends spawn the actual coding agent CLI
 (Codex / Claude Code) as a subprocess, capture stdout/stderr/diff, and report
-progress. Safety gates (dual confirmation) are non-negotiable.
+progress. Execution isolation is non-negotiable.
 
 ## Context
 
@@ -51,19 +51,21 @@ Env vars:
   ARIADNE_CLAUDE_EFFORT            (effort override)
 ```
 
-### Safety Gate (both backends)
+### Isolation Gate (both backends)
 
 ```python
 def execute(self, context, on_progress=None):
-    if os.environ.get("ARIADNE_ENABLE_EXTERNAL_EXECUTION") != "1":
-        return _blocked_result(context, "ARIADNE_ENABLE_EXTERNAL_EXECUTION must be 1")
-    if not context.confirm_execution:
-        return _blocked_result(context, "--confirm-execution is required")
+    if context.confirm_execution:
+        execution_repo = context.target_repo_path
+    elif is_git_repo(context.target_repo_path):
+        execution_repo = create_detached_worktree(context.target_repo_path)
+    else:
+        return _blocked_result(context, "non-git target requires --write-workspace")
     # ... proceed with subprocess
 ```
 
-No real execution without both gates. Blocked results have `success=False`,
-`failure_reason=EXTERNAL_EXECUTION_BLOCKED`.
+No silent fallback from failed worktree isolation to target-repository writes.
+Blocked results have `success=False` and `failure_reason=AGENT_ERROR`.
 
 ### Command Template Rendering
 
@@ -118,9 +120,10 @@ pytest tests/test_backends.py tests/test_daemon.py -v
 
 ### test_backends.py must cover:
 
-- `test_safety_gate_blocks_without_env`: no ARIADNE_ENABLE_EXTERNAL_EXECUTION → blocked
-- `test_safety_gate_blocks_without_confirm`: no confirm_execution → blocked
-- `test_safety_gate_blocks_with_only_env`: env set but no confirm → blocked
+- `test_git_repo_executes_in_worktree_without_env_or_confirmation`: git repo executes in isolated worktree
+- `test_non_git_directory_requires_write_workspace`: non-git target without write-workspace → blocked
+- `test_write_workspace_allows_non_git_directory_execution`: write-workspace executes directly in non-git target
+- `test_worktree_creation_failure_does_not_fallback_to_target_repo`: failed isolation does not write target repo
 - `test_command_template_rendering`: all supported placeholders render correctly
 - `test_unknown_placeholder_raises`: unknown {foo} → ValueError
 - `test_diff_capture_git_repo`: git repo with changes → diff + changed_files populated

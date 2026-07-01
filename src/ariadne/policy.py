@@ -1,13 +1,13 @@
 """Layered execution policy gate.
 
-The backend still keeps its own subprocess safety checks. This module is the
-control-plane gate: it decides whether a TaskRun is allowed to reach a real
-coding-agent backend and names the layer that blocked it.
+The backend owns workspace isolation and the explicit write-workspace escape
+hatch. This module is the control-plane gate: it decides whether a TaskRun is
+allowed to reach a real coding-agent backend and names the layer that blocked
+it.
 """
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -197,18 +197,6 @@ def evaluate_execution_policy(
                 tools_allowed=skill.tools_allowed,
             )
 
-    if not context.confirm_execution:
-        return _blocked(
-            ExecutionPolicyLayer.TASKRUN,
-            "TaskRun confirmation is required for real execution",
-            taskrun_id=task.id,
-        )
-    if os.environ.get("ARIADNE_ENABLE_EXTERNAL_EXECUTION") != "1":
-        return _blocked(
-            ExecutionPolicyLayer.TASKRUN,
-            "ARIADNE_ENABLE_EXTERNAL_EXECUTION must be 1 for real execution",
-            taskrun_id=task.id,
-        )
     if context.timeout_seconds < 1 or context.timeout_seconds > 7200:
         return _blocked(
             ExecutionPolicyLayer.TASKRUN,

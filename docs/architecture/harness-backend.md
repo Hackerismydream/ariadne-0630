@@ -55,7 +55,7 @@ class ExecutionContext(BaseModel):
     target_repo_path: str         # absolute path to repo
     skill_refs: list[str]         # skill files to materialize
     timeout_seconds: int = 600
-    confirm_execution: bool = False
+    confirm_execution: bool = False   # compatibility field; true means write target workspace directly
     model: str | None = None
     effort: str | None = None     # reasoning effort override
     trace_id: str | None = None
@@ -99,7 +99,7 @@ available.
 
 ### CodexBackend
 
-> Adapted from Ariadne `ariadne_ltb/execution.py:341` (proven, has safety gates)
+> Adapted from Ariadne `ariadne_ltb/execution.py:341`
 
 ```
 Command template: codex exec --cd {target_repo} - < {handoff_file}
@@ -126,21 +126,24 @@ Env vars:
   ARIADNE_CLAUDE_EFFORT            (effort override)
 ```
 
-## Safety Gate (non-negotiable)
+## Isolation Gate (non-negotiable)
 
-Both backends require **dual confirmation** before any real execution:
+Real backend execution is isolation-first:
 
 ```python
 def execute(self, context: ExecutionContext, ...) -> ExecutionResult:
-    if os.environ.get("ARIADNE_ENABLE_EXTERNAL_EXECUTION") != "1":
-        return _blocked("ARIADNE_ENABLE_EXTERNAL_EXECUTION must be 1")
-    if not context.confirm_execution:
-        return _blocked("--confirm-execution is required")
-    # ... proceed with subprocess.run
+    if context.confirm_execution:
+        execution_repo = context.target_repo_path
+    elif is_git_repo(context.target_repo_path):
+        execution_repo = create_detached_worktree(context.target_repo_path)
+    else:
+        return _blocked("non-git target requires --write-workspace")
+    # ... proceed with subprocess execution in execution_repo
 ```
 
-No real execution without both gates. This is carried over from Ariadne and
-matches multica's gated execution approach.
+If worktree creation fails, execution stops. The backend never silently falls
+back to writing the target repository. `confirm_execution` remains the internal
+compatibility field, but the CLI exposes the behavior as `--write-workspace`.
 
 ## Command Template Rendering
 
@@ -219,8 +222,10 @@ If repo is not a git repo → `diff=None, changed_files=[]`. No error, just abse
 
 | Test | What it verifies |
 |------|-----------------|
-| `test_safety_gate_blocks_without_env` | No `ARIADNE_ENABLE_EXTERNAL_EXECUTION` → blocked result |
-| `test_safety_gate_blocks_without_confirm` | No `confirm_execution` → blocked result |
+| `test_git_repo_executes_in_worktree_without_env_or_confirmation` | Git repo executes in an isolated worktree without env or confirmation gates |
+| `test_non_git_directory_requires_write_workspace` | Non-git target without write-workspace → blocked result |
+| `test_write_workspace_allows_non_git_directory_execution` | Explicit write-workspace executes directly in a non-git directory |
+| `test_worktree_creation_failure_does_not_fallback_to_target_repo` | Worktree creation failure is a hard stop |
 | `test_command_template_rendering` | All supported placeholders render correctly |
 | `test_provider_specific_resume_and_mcp_fragments` | Resume/MCP fragments are conditional |
 | `test_unknown_placeholder_fails` | Unknown placeholder → `ValueError` |

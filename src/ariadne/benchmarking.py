@@ -11,7 +11,6 @@ import argparse
 import csv
 import hashlib
 import json
-import os
 import platform
 import sqlite3
 import statistics
@@ -688,7 +687,6 @@ def run_real_backend_patch(artifact_dir: Path, provider: str = "synthetic") -> d
     try:
         backend = backend_for_provider(provider)
         real_provider = provider in {"codex", "claude-code"}
-        external_enabled = os.environ.get("ARIADNE_ENABLE_EXTERNAL_EXECUTION") == "1"
         setup_runtime(store)
         profile = store.create_agent_profile("Patch Agent", preferred_capabilities=[provider])
         fixture_root = artifact_dir / "repo_fixtures"
@@ -700,10 +698,10 @@ def run_real_backend_patch(artifact_dir: Path, provider: str = "synthetic") -> d
             task = store.enqueue_taskrun(issue.id, profile.id)
             store.claim_task(profile.id, f"runtime-patch-{case_index}")
             store.start_task(task.id)
-            run_allowed = provider == "synthetic" or (external_enabled and backend.is_available())
+            run_allowed = backend.is_available()
             if not run_allowed:
-                reason = "provider_unavailable" if not backend.is_available() else "policy_blocked"
-                store.fail_task(task.id, reason, FailureReason.PROVIDER_ERROR if reason == "provider_unavailable" else FailureReason.POLICY_BLOCKED)
+                reason = "provider_unavailable"
+                store.fail_task(task.id, reason, FailureReason.PROVIDER_ERROR)
                 case_rows.append({"case_id": case_index, "provider": provider, "status": reason})
                 continue
             context = ExecutionContext(
@@ -713,18 +711,11 @@ def run_real_backend_patch(artifact_dir: Path, provider: str = "synthetic") -> d
                 handoff_prompt="Write fixed.txt with ok.",
                 target_repo_path=str(repo),
                 skill_refs=[],
-                confirm_execution=True,
+                confirm_execution=False,
                 trace_id=f"patch-{case_index}",
                 test_command=f"{shlex_quote(sys.executable)} -c \"from pathlib import Path; assert Path('fixed.txt').read_text() == 'ok'\"",
             )
-            env = {"ARIADNE_ENABLE_EXTERNAL_EXECUTION": "1"} if provider == "synthetic" else {}
-            old_env = os.environ.copy()
-            os.environ.update(env)
-            try:
-                result = backend.execute(context)
-            finally:
-                os.environ.clear()
-                os.environ.update(old_env)
+            result = backend.execute(context)
             if result.success:
                 store.complete_task(task.id, result.model_dump(mode="json"))
             else:

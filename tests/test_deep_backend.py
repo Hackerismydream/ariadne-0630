@@ -120,10 +120,9 @@ def test_streaming_progress():
             pass
 
     backend = CodexBackend()
-    context = _make_context(target_repo_path="/tmp")
+    context = _make_context(target_repo_path="/tmp", confirm_execution=True)
 
-    with patch.dict("os.environ", {"ARIADNE_ENABLE_EXTERNAL_EXECUTION": "1"}), \
-         patch.object(backend, "is_available", return_value=True), \
+    with patch.object(backend, "is_available", return_value=True), \
          patch("subprocess.Popen", return_value=FakeProc()), \
          patch("ariadne.backends._is_git_repo", return_value=False), \
          patch("ariadne.backends._capture_diff", return_value=(None, [])):

@@ -488,22 +488,25 @@ def squad_add_member(
 def daemon_start(
     max_iterations: int = typer.Option(None, "--max-iterations"),
     poll_interval: float = typer.Option(3.0, "--poll-interval"),
-    confirm_execution: bool = typer.Option(False, "--confirm-execution", help="Enable real backend execution"),
+    write_workspace: bool = typer.Option(
+        False,
+        "--write-workspace",
+        help="Write directly to the target repo instead of an isolated git worktree",
+    ),
     target_repo: str = typer.Option(".", "--target-repo", help="Target repo path for execution"),
 ):
     """Start the daemon poll loop."""
-    if confirm_execution:
-        os.environ["ARIADNE_ENABLE_EXTERNAL_EXECUTION"] = "1"
     store = _get_store()
     daemon = Daemon(
         store=store,
         backend_factory=get_backend,
         poll_interval=poll_interval,
         target_repo_path=target_repo,
+        write_workspace=write_workspace,
     )
     typer.echo(f"Starting daemon (runtime={daemon.runtime_id}, poll={poll_interval}s)")
-    if confirm_execution:
-        typer.echo("  ⚠️  real execution ENABLED")
+    if write_workspace:
+        typer.echo("  write-workspace ENABLED")
     if max_iterations:
         typer.echo(f"  max_iterations={max_iterations}")
     daemon.start(max_iterations=max_iterations)
@@ -746,16 +749,17 @@ def demo_v1(
 @app.command()
 def squad_run(
     target_repo: str = typer.Option(..., "--target-repo", help="Target repo path"),
-    confirm_execution: bool = typer.Option(False, "--confirm-execution", help="Enable real backend execution"),
+    write_workspace: bool = typer.Option(
+        False,
+        "--write-workspace",
+        help="Write directly to the target repo instead of an isolated git worktree",
+    ),
     title: str = typer.Option("Multi-step feature implementation", "--title"),
     description: str = typer.Option("Add a string_utils module with capitalize and reverse functions, plus tests", "--description"),
     poll_interval: float = typer.Option(2.0, "--poll-interval"),
     max_iterations: int = typer.Option(20, "--max-iterations"),
 ):
     """Create a squad with leader + 2 members and run the full orchestration loop."""
-    if confirm_execution:
-        os.environ["ARIADNE_ENABLE_EXTERNAL_EXECUTION"] = "1"
-
     from ariadne.daemon import Daemon
     from ariadne.llm_decide import make_llm_decide
     from ariadne.orchestrator import Orchestrator
@@ -779,8 +783,8 @@ def squad_run(
     typer.echo(f"Squad: {squad.id} (leader={leader.name}, members=[{coder.name}, {tester.name}])")
     typer.echo(f"Issue: {issue.id} — {title}")
     typer.echo(f"Target repo: {target_repo}")
-    if confirm_execution:
-        typer.echo("⚠️  real execution ENABLED")
+    if write_workspace:
+        typer.echo("write-workspace ENABLED")
     typer.echo("Starting orchestration loop...")
 
     # Wire orchestrator
@@ -792,6 +796,7 @@ def squad_run(
         poll_interval=poll_interval,
         orchestrator=orc,
         target_repo_path=target_repo,
+        write_workspace=write_workspace,
     )
     daemon.start(max_iterations=max_iterations)
     store.close()

@@ -75,10 +75,14 @@ def test_failure_reason_values():
     assert FailureReason.RUNTIME_RECOVERY.value == "runtime_recovery"
     assert FailureReason.MANUAL.value == "manual"
     assert FailureReason.POLICY_BLOCKED.value == "policy_blocked"
+    assert FailureReason.PROVIDER_ERROR.value == "provider_error"
+    assert FailureReason.TEST_FAILURE.value == "test_failure"
+    assert FailureReason.ROUTING_FAILURE.value == "routing_failure"
+    assert FailureReason.LLM_PARSE_FAILURE.value == "llm_parse_failure"
 
 
-def test_failure_reason_has_exactly_six_members():
-    assert len(list(FailureReason)) == 6
+def test_failure_reason_has_exactly_ten_members():
+    assert len(list(FailureReason)) == 10
     assert {m.value for m in FailureReason} == {
         "agent_error",
         "timeout",
@@ -86,6 +90,10 @@ def test_failure_reason_has_exactly_six_members():
         "runtime_recovery",
         "manual",
         "policy_blocked",
+        "provider_error",
+        "test_failure",
+        "routing_failure",
+        "llm_parse_failure",
     }
 
 

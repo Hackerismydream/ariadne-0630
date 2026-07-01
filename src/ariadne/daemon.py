@@ -199,15 +199,23 @@ class Daemon:
             logger.warning("unknown backend '%s', falling back to dry-run", backend_name)
             backend = self.backend_factory("dry-run")
 
+        bound_skills = self.store.list_skills_for_agent_profile(task.agent_id)
+        skill_refs = [skill.name for skill in bound_skills]
+        test_command = next(
+            (skill.test_command for skill in bound_skills if skill.test_command),
+            None,
+        )
+
         context = ExecutionContext(
             task_id=task.id,
             agent_name=agent_name,
             agent_instructions=instructions,
             handoff_prompt=task.handoff_prompt or f"Execute task for issue {task.issue_id}",
             target_repo_path=self.target_repo_path,
-            skill_refs=[],
+            skill_refs=skill_refs,
             confirm_execution=True,
             trace_id=task.trace_id,
+            test_command=test_command,
         )
 
         policy = evaluate_execution_policy(
@@ -366,4 +374,14 @@ def _result_to_dict(result: ExecutionResult) -> dict:
         "changed_files": result.changed_files,
         "duration_seconds": result.duration_seconds,
         "command": result.command,
+        "command_cwd": result.command_cwd,
+        "execution_repo_path": result.execution_repo_path,
+        "metadata": result.metadata,
+        "session_id": result.session_id,
+        "test_command": result.test_command,
+        "test_exit_code": result.test_exit_code,
+        "test_stdout": result.test_stdout,
+        "test_stderr": result.test_stderr,
+        "test_duration_seconds": result.test_duration_seconds,
+        "test_passed": result.test_passed,
     }

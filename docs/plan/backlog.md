@@ -11,8 +11,9 @@
 | Multi-worker daemon | Single-worker sufficient for local demo | Post-秋招 |
 | Memory / backlog planning | Out of scope | Never (by design) |
 | Autopilot / scheduled tasks | Out of scope | Never (by design) |
-| Agent skills materialization | Handoff prompt carries skill refs; full materialization deferred | Post-秋招 |
 | Per-agent max_concurrent_tasks | Single worker, no concurrency needed | Post-秋招 |
+| Third-party backend entry-point discovery | Built-in backend registry and benchmark smoke are enough until real external backend authors exist | 拉 star 阶段 |
+| Human trace replay time study | Current trace benchmark measures artifact coverage; human diagnosis timing needs controlled evaluator study | Mature evaluation phase |
 
 ## Non-blocking findings from verify
 

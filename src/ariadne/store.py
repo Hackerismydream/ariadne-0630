@@ -22,6 +22,7 @@ from ariadne.models import (
     Squad,
     SquadMember,
     Task,
+    TaskRun,
     TaskStatus,
 )
 
@@ -208,6 +209,11 @@ class Store:
         )
 
     @staticmethod
+    def _row_to_taskrun(row: sqlite3.Row) -> TaskRun:
+        task = Store._row_to_task(row)
+        return TaskRun(**task.model_dump())
+
+    @staticmethod
     def _row_to_issue(row: sqlite3.Row) -> Issue:
         return Issue(
             id=row["id"],
@@ -330,8 +336,44 @@ class Store:
         handoff_prompt: str | None = None,
         trace_id: str | None = None,
     ) -> Task:
+        return self._enqueue_task_record(
+            "task",
+            issue_id,
+            agent_id,
+            squad_id=squad_id,
+            handoff_prompt=handoff_prompt,
+            trace_id=trace_id,
+        )
+
+    def enqueue_taskrun(
+        self,
+        issue_id: str,
+        agent_profile_id: str,
+        squad_id: str | None = None,
+        handoff_prompt: str | None = None,
+        trace_id: str | None = None,
+    ) -> TaskRun:
+        task = self._enqueue_task_record(
+            "taskrun",
+            issue_id,
+            agent_profile_id,
+            squad_id=squad_id,
+            handoff_prompt=handoff_prompt,
+            trace_id=trace_id,
+        )
+        return TaskRun(**task.model_dump())
+
+    def _enqueue_task_record(
+        self,
+        id_prefix: str,
+        issue_id: str,
+        agent_id: str,
+        squad_id: str | None = None,
+        handoff_prompt: str | None = None,
+        trace_id: str | None = None,
+    ) -> Task:
         task = Task(
-            id=_new_id("task"),
+            id=_new_id(id_prefix),
             issue_id=issue_id,
             agent_id=agent_id,
             squad_id=squad_id,
@@ -399,6 +441,10 @@ class Store:
                 ).fetchone()
             )
 
+    def claim_taskrun(self, agent_profile_id: str, runtime_id: str) -> TaskRun | None:
+        task = self.claim_task(agent_profile_id, runtime_id)
+        return TaskRun(**task.model_dump()) if task else None
+
     def start_task(self, task_id: str) -> Task:
         task = self._load_task(task_id)
         self._check_transition(task.status, TaskStatus.RUNNING, "start_task")
@@ -409,6 +455,10 @@ class Store:
         )
         self._conn.commit()
         return self._load_task(task_id)
+
+    def start_taskrun(self, taskrun_id: str) -> TaskRun:
+        task = self.start_task(taskrun_id)
+        return TaskRun(**task.model_dump())
 
     def complete_task(self, task_id: str, result: dict) -> Task:
         task = self._load_task(task_id)
@@ -423,6 +473,10 @@ class Store:
         self._conn.commit()
         return self._load_task(task_id)
 
+    def complete_taskrun(self, taskrun_id: str, result: dict) -> TaskRun:
+        task = self.complete_task(taskrun_id, result)
+        return TaskRun(**task.model_dump())
+
     def fail_task(self, task_id: str, error: str, reason: FailureReason) -> Task:
         task = self._load_task(task_id)
         self._check_transition(task.status, TaskStatus.FAILED, "fail_task")
@@ -435,6 +489,12 @@ class Store:
         )
         self._conn.commit()
         return self._load_task(task_id)
+
+    def fail_taskrun(
+        self, taskrun_id: str, error: str, reason: FailureReason
+    ) -> TaskRun:
+        task = self.fail_task(taskrun_id, error, reason)
+        return TaskRun(**task.model_dump())
 
     def cancel_task(self, task_id: str) -> Task:
         task = self._load_task(task_id)
@@ -453,6 +513,10 @@ class Store:
         self._conn.commit()
         return self._load_task(task_id)
 
+    def cancel_taskrun(self, taskrun_id: str) -> TaskRun:
+        task = self.cancel_task(taskrun_id)
+        return TaskRun(**task.model_dump())
+
     def retry_task(self, task_id: str) -> Task:
         """Create a new queued task that re-attempts the failed one.
 
@@ -466,7 +530,7 @@ class Store:
                 f"task {task_id} already reached max_attempts ({old.max_attempts})"
             )
         new_task = Task(
-            id=_new_id("task"),
+            id=_new_id("taskrun" if old.id.startswith("taskrun-") else "task"),
             issue_id=old.issue_id,
             agent_id=old.agent_id,
             squad_id=old.squad_id,
@@ -502,11 +566,25 @@ class Store:
         self.log_activity(new_task.trace_id, new_task.id, "retried", {"attempt": new_task.attempt, "parent": old.id})
         return new_task
 
+    def retry_taskrun(self, taskrun_id: str) -> TaskRun:
+        task = self.retry_task(taskrun_id)
+        return TaskRun(**task.model_dump())
+
     def get_task(self, task_id: str) -> Task | None:
         row = self._conn.execute(
             "SELECT * FROM task WHERE id = ?", (task_id,)
         ).fetchone()
         return self._row_to_task(row) if row else None
+
+    def get_taskrun(self, taskrun_id: str) -> TaskRun | None:
+        row = self._conn.execute(
+            "SELECT * FROM task WHERE id = ?", (taskrun_id,)
+        ).fetchone()
+        return self._row_to_taskrun(row) if row else None
+
+    def list_taskruns(self) -> list[TaskRun]:
+        rows = self._conn.execute("SELECT * FROM task ORDER BY created_at DESC").fetchall()
+        return [self._row_to_taskrun(r) for r in rows]
 
     def get_pending_member_tasks(self, squad_id: str) -> list[Task]:
         """Return non-terminal tasks belonging to squad members (not the leader)."""

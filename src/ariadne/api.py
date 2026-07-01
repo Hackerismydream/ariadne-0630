@@ -73,6 +73,27 @@ def list_tasks():
     ]
 
 
+@app.get("/api/taskruns")
+def list_taskruns():
+    """List all TaskRuns with v1 naming."""
+    store = _get_store()
+    taskruns = store.list_taskruns()
+    store.close()
+    return [
+        {
+            "id": t.id,
+            "issue_id": t.issue_id,
+            "agent_profile_id": t.agent_profile_id,
+            "squad_id": t.squad_id,
+            "status": t.status.value,
+            "attempt": t.attempt,
+            "trace_id": t.trace_id,
+            "created_at": t.created_at.isoformat(),
+        }
+        for t in taskruns
+    ]
+
+
 @app.get("/api/tasks/{task_id}/timeline")
 def task_timeline(task_id: str):
     """Get activity log timeline for a task's trace_id."""
@@ -85,6 +106,22 @@ def task_timeline(task_id: str):
         store.close()
         return []
     events = store.get_timeline(task.trace_id)
+    store.close()
+    return events
+
+
+@app.get("/api/taskruns/{taskrun_id}/timeline")
+def taskrun_timeline(taskrun_id: str):
+    """Get activity log timeline for a TaskRun's trace_id."""
+    store = _get_store()
+    taskrun = store.get_taskrun(taskrun_id)
+    if taskrun is None:
+        store.close()
+        raise HTTPException(status_code=404, detail="taskrun not found")
+    if not taskrun.trace_id:
+        store.close()
+        return []
+    events = store.get_timeline(taskrun.trace_id)
     store.close()
     return events
 

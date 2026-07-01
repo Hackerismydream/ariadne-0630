@@ -82,6 +82,26 @@ def task_create(
 
 
 @app.command()
+def taskrun_create(
+    issue_id: str = typer.Argument(...),
+    handoff_prompt: str = typer.Option("", "--handoff", "-h", help="Handoff prompt for the agent"),
+):
+    """Enqueue a TaskRun for an issue's assignee."""
+    store = _get_store()
+    issue = store.get_issue(issue_id)
+    if issue is None:
+        typer.echo(f"Issue not found: {issue_id}", err=True)
+        raise typer.Exit(1)
+    taskrun = store.enqueue_taskrun(
+        issue.id,
+        issue.assignee_id,
+        handoff_prompt=handoff_prompt or None,
+    )
+    typer.echo(f"Created taskrun: {taskrun.id} (status={taskrun.status.value})")
+    store.close()
+
+
+@app.command()
 def task_list():
     """List all tasks."""
     store = _get_store()
@@ -93,6 +113,23 @@ def task_list():
         return
     for r in rows:
         typer.echo(f"  {r['id']}  [{r['status']}]  issue={r['issue_id']}  attempt={r['attempt']}")
+    store.close()
+
+
+@app.command()
+def taskrun_list():
+    """List all TaskRuns."""
+    store = _get_store()
+    taskruns = store.list_taskruns()
+    if not taskruns:
+        typer.echo("No taskruns.")
+        return
+    for taskrun in taskruns:
+        typer.echo(
+            f"  {taskrun.id}  [{taskrun.status.value}]  "
+            f"issue={taskrun.issue_id}  agent_profile={taskrun.agent_profile_id}  "
+            f"attempt={taskrun.attempt}"
+        )
     store.close()
 
 
@@ -119,6 +156,35 @@ def task_timeline(
     for e in events:
         details_str = f"  {e['details']}" if e["details"] else ""
         typer.echo(f"  {e['created_at']}  [{e['event']}]  task={e['task_id']}{details_str}")
+    store.close()
+
+
+@app.command()
+def taskrun_timeline(
+    taskrun_id: str = typer.Argument(...),
+):
+    """Show timeline events for a TaskRun's trace_id."""
+    store = _get_store()
+    taskrun = store.get_taskrun(taskrun_id)
+    if taskrun is None:
+        typer.echo(f"TaskRun not found: {taskrun_id}", err=True)
+        raise typer.Exit(1)
+    if not taskrun.trace_id:
+        typer.echo("No trace_id for this TaskRun.")
+        store.close()
+        return
+    events = store.get_timeline(taskrun.trace_id)
+    if not events:
+        typer.echo("No events recorded.")
+        store.close()
+        return
+    typer.echo(f"Timeline for TaskRun trace {taskrun.trace_id}:")
+    for e in events:
+        details_str = f"  {e['details']}" if e["details"] else ""
+        typer.echo(
+            f"  {e['created_at']}  [{e['event']}]  "
+            f"taskrun={e['task_id']}{details_str}"
+        )
     store.close()
 
 

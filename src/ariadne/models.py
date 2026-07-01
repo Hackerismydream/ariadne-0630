@@ -111,6 +111,21 @@ class Task(BaseModel):
         )
 
 
+class TaskRun(Task):
+    """v1 name for one execution attempt against an Issue.
+
+    Task remains as a compatibility model for the original public surface.
+    """
+
+    @property
+    def agent_profile_id(self) -> str:
+        return self.agent_id
+
+    @property
+    def parent_taskrun_id(self) -> str | None:
+        return self.parent_task_id
+
+
 # ---------------------------------------------------------------------------
 # Agent / Squad
 # ---------------------------------------------------------------------------

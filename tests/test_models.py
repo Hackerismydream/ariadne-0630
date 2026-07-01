@@ -39,6 +39,7 @@ from ariadne.models import (
 
 def test_task_status_values():
     assert TaskStatus.QUEUED.value == "queued"
+    assert TaskStatus.PREPARING.value == "preparing"
     assert TaskStatus.CLAIMED.value == "claimed"
     assert TaskStatus.RUNNING.value == "running"
     assert TaskStatus.COMPLETED.value == "completed"
@@ -46,10 +47,11 @@ def test_task_status_values():
     assert TaskStatus.CANCELLED.value == "cancelled"
 
 
-def test_task_status_has_exactly_six_members():
-    assert len(list(TaskStatus)) == 6
+def test_task_status_has_exactly_seven_members():
+    assert len(list(TaskStatus)) == 7
     assert {m.value for m in TaskStatus} == {
         "queued",
+        "preparing",
         "claimed",
         "running",
         "completed",

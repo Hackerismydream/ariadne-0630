@@ -51,12 +51,12 @@ def agent_with_task(store):
 
 
 def test_poll_claims_queued_task(daemon, agent_with_task):
-    """enqueue task → poll_once → task becomes claimed"""
+    """enqueue task → poll_once → task becomes preparing via RuntimeLease"""
     agent, task = agent_with_task
     claimed = daemon._poll_once()
     assert claimed is not None
     assert claimed.id == task.id
-    assert claimed.status == TaskStatus.CLAIMED
+    assert claimed.status == TaskStatus.PREPARING
 
 
 def test_poll_returns_none_when_no_tasks(daemon, store):

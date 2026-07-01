@@ -25,6 +25,7 @@ class TaskStatus(str, Enum):
     """Lifecycle state of a Task (atomic-claim state machine)."""
 
     QUEUED = "queued"
+    PREPARING = "preparing"
     CLAIMED = "claimed"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -77,6 +78,15 @@ class RuntimeCapabilityStatus(str, Enum):
     DISABLED = "disabled"
 
 
+class RuntimeLeaseStatus(str, Enum):
+    """Temporary ownership state for a TaskRun."""
+
+    ACTIVE = "active"
+    RELEASED = "released"
+    EXPIRED = "expired"
+    REVOKED = "revoked"
+
+
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
@@ -113,6 +123,23 @@ class RuntimeCapability(BaseModel):
     default_args: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
     last_checked_at: datetime | None = None
+
+
+class RuntimeLease(BaseModel):
+    """Temporary ownership of a TaskRun by a RuntimeMachine."""
+
+    id: str
+    taskrun_id: str
+    runtime_machine_id: str
+    runtime_capability_id: str
+    status: RuntimeLeaseStatus
+    lease_token: str
+    acquired_at: datetime
+    last_heartbeat_at: datetime | None = None
+    released_at: datetime | None = None
+    expires_at: datetime
+    revoke_reason: str | None = None
+    metadata: dict = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +207,13 @@ class TaskRun(Task):
     @property
     def parent_taskrun_id(self) -> str | None:
         return self.parent_task_id
+
+
+class TaskRunClaim(BaseModel):
+    """Result of atomically claiming a TaskRun through a RuntimeLease."""
+
+    taskrun: TaskRun
+    lease: RuntimeLease
 
 
 # ---------------------------------------------------------------------------

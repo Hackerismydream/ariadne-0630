@@ -22,6 +22,7 @@ from ariadne.models import (
     ProgressUpdate,
     RuntimeCapabilityStatus,
     Task,
+    TaskStatus,
 )
 from ariadne.store import MaxAttemptsExhausted, Store
 
@@ -130,13 +131,17 @@ class Daemon:
         self._runtime_registered = True
 
     def _poll_once(self) -> Task | None:
-        """Try to claim the oldest queued task for any agent. Returns task or None."""
-        agents = self.store.list_agents()
-        for agent in agents:
-            task = self.store.claim_task(agent.id, self.runtime_id)
-            if task is not None:
-                logger.info("claimed task %s for agent %s", task.id, agent.name)
-                return task
+        """Try to claim the oldest queued TaskRun for this runtime."""
+        if not self._runtime_registered:
+            self._register_runtime()
+        claim = self.store.claim_taskrun_for_runtime_machine(self.runtime_id)
+        if claim is not None:
+            logger.info(
+                "claimed taskrun %s with lease %s",
+                claim.taskrun.id,
+                claim.lease.id,
+            )
+            return claim.taskrun
         return None
 
     def _execute_task(self, task: Task) -> None:
@@ -165,8 +170,13 @@ class Daemon:
             logger.error("no orchestrator set — cannot handle leader task %s", task.id)
             self.store.start_task(task.id)
             self.store.fail_task(task.id, "no orchestrator configured", FailureReason.AGENT_ERROR)
+            self._release_active_lease(task.id)
             return
+        latest = self.store.get_task(task.id)
+        if latest and latest.status in (TaskStatus.PREPARING, TaskStatus.CLAIMED):
+            self.store.start_task(task.id)
         self.orchestrator.handle_leader_task(task)
+        self._release_active_lease(task.id)
 
     def _execute_member_task(self, task: Task) -> None:
         """Execute a member task via backend."""
@@ -203,23 +213,27 @@ class Daemon:
             result = backend.execute(context, on_progress=self._on_progress)
         except TimeoutError:
             self.store.fail_task(task.id, "execution timed out", FailureReason.TIMEOUT)
+            self._release_active_lease(task.id)
             self._maybe_retry(task)
             self._trigger_event_loop(task)
             return
         except Exception as e:
             self.store.fail_task(task.id, str(e), FailureReason.AGENT_ERROR)
+            self._release_active_lease(task.id)
             self._maybe_retry(task)
             self._trigger_event_loop(task)
             return
 
         if result.success:
             self.store.complete_task(task.id, _result_to_dict(result))
+            self._release_active_lease(task.id)
             if task.trace_id:
                 self.store.log_activity(task.trace_id, task.id, "completed", {"backend": result.backend_name})
             logger.info("task %s completed", task.id)
         else:
             reason = result.failure_reason or FailureReason.AGENT_ERROR
             self.store.fail_task(task.id, result.stderr or "execution failed", reason)
+            self._release_active_lease(task.id)
             if task.trace_id:
                 self.store.log_activity(task.trace_id, task.id, "failed", {"reason": reason.value, "error": result.stderr[:200] if result.stderr else ""})
             self._maybe_retry(task)
@@ -231,6 +245,11 @@ class Daemon:
         """Notify orchestrator that a member task completed (if orchestrator is set)."""
         if self.orchestrator and task.squad_id:
             self.orchestrator.on_member_task_complete(task)
+
+    def _release_active_lease(self, task_id: str) -> None:
+        lease = self.store.get_active_runtime_lease_for_taskrun(task_id)
+        if lease is not None:
+            self.store.release_runtime_lease(lease.id)
 
     def _maybe_retry(self, task: Task) -> None:
         """Retry if attempts remain."""

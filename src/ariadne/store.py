@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ariadne.models import (
     Agent,
@@ -21,12 +21,15 @@ from ariadne.models import (
     IssueStatus,
     RuntimeCapability,
     RuntimeCapabilityStatus,
+    RuntimeLease,
+    RuntimeLeaseStatus,
     RuntimeMachine,
     RuntimeMachineStatus,
     Squad,
     SquadMember,
     Task,
     TaskRun,
+    TaskRunClaim,
     TaskStatus,
 )
 
@@ -57,6 +60,10 @@ class MaxAttemptsExhausted(Exception):
 # (from_status, to_status) pairs that are legal.
 _LEGAL_TRANSITIONS: set[tuple[TaskStatus, TaskStatus]] = {
     (TaskStatus.QUEUED, TaskStatus.CLAIMED),
+    (TaskStatus.QUEUED, TaskStatus.PREPARING),
+    (TaskStatus.PREPARING, TaskStatus.RUNNING),
+    (TaskStatus.PREPARING, TaskStatus.FAILED),
+    (TaskStatus.PREPARING, TaskStatus.CANCELLED),
     (TaskStatus.CLAIMED, TaskStatus.RUNNING),
     (TaskStatus.CLAIMED, TaskStatus.QUEUED),       # stale claim recovery
     (TaskStatus.RUNNING, TaskStatus.COMPLETED),
@@ -111,6 +118,25 @@ CREATE TABLE IF NOT EXISTS runtime_capability (
     UNIQUE(runtime_machine_id, provider, command_path)
 );
 
+CREATE TABLE IF NOT EXISTS runtime_lease (
+    id TEXT PRIMARY KEY,
+    taskrun_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+    runtime_machine_id TEXT NOT NULL REFERENCES runtime_machine(id),
+    runtime_capability_id TEXT NOT NULL REFERENCES runtime_capability(id),
+    status TEXT NOT NULL
+        CHECK (status IN ('active', 'released', 'expired', 'revoked')),
+    lease_token TEXT NOT NULL UNIQUE,
+    acquired_at TEXT NOT NULL,
+    last_heartbeat_at TEXT,
+    released_at TEXT,
+    expires_at TEXT NOT NULL,
+    revoke_reason TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_lease_one_active
+    ON runtime_lease(taskrun_id) WHERE status = 'active';
+
 CREATE TABLE IF NOT EXISTS issue (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -128,7 +154,7 @@ CREATE TABLE IF NOT EXISTS task (
     agent_id TEXT NOT NULL,
     squad_id TEXT,
     status TEXT NOT NULL DEFAULT 'queued'
-        CHECK (status IN ('queued', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
+        CHECK (status IN ('queued', 'preparing', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
     attempt INTEGER NOT NULL DEFAULT 1,
     max_attempts INTEGER NOT NULL DEFAULT 2,
     parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
@@ -296,6 +322,27 @@ class Store:
             last_checked_at=datetime.fromisoformat(row["last_checked_at"])
             if row["last_checked_at"]
             else None,
+        )
+
+    @staticmethod
+    def _row_to_runtime_lease(row: sqlite3.Row) -> RuntimeLease:
+        return RuntimeLease(
+            id=row["id"],
+            taskrun_id=row["taskrun_id"],
+            runtime_machine_id=row["runtime_machine_id"],
+            runtime_capability_id=row["runtime_capability_id"],
+            status=RuntimeLeaseStatus(row["status"]),
+            lease_token=row["lease_token"],
+            acquired_at=datetime.fromisoformat(row["acquired_at"]),
+            last_heartbeat_at=datetime.fromisoformat(row["last_heartbeat_at"])
+            if row["last_heartbeat_at"]
+            else None,
+            released_at=datetime.fromisoformat(row["released_at"])
+            if row["released_at"]
+            else None,
+            expires_at=datetime.fromisoformat(row["expires_at"]),
+            revoke_reason=row["revoke_reason"],
+            metadata=json.loads(row["metadata"]),
         )
 
     @staticmethod
@@ -512,6 +559,195 @@ class Store:
         if row is None:
             raise KeyError(f"runtime capability not found: {capability_id}")
         return self._row_to_runtime_capability(row)
+
+    def claim_taskrun_for_runtime_machine(
+        self,
+        runtime_machine_id: str,
+        lease_seconds: int = 60,
+    ) -> TaskRunClaim | None:
+        """Atomically claim the oldest queued TaskRun through a RuntimeLease."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                capability = self._conn.execute(
+                    """SELECT * FROM runtime_capability
+                       WHERE runtime_machine_id = ? AND status = 'available'
+                       ORDER BY provider LIMIT 1""",
+                    (runtime_machine_id,),
+                ).fetchone()
+                if capability is None:
+                    self._conn.execute("COMMIT")
+                    return None
+                task = self._conn.execute(
+                    """SELECT * FROM task
+                       WHERE status = 'queued'
+                       ORDER BY created_at LIMIT 1""",
+                ).fetchone()
+                if task is None:
+                    self._conn.execute("COMMIT")
+                    return None
+                now_dt = datetime.now(timezone.utc)
+                now = now_dt.isoformat()
+                lease_id = _new_id("lease")
+                self._conn.execute(
+                    """INSERT INTO runtime_lease
+                       (id, taskrun_id, runtime_machine_id, runtime_capability_id,
+                        status, lease_token, acquired_at, last_heartbeat_at,
+                        expires_at, metadata)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        lease_id,
+                        task["id"],
+                        runtime_machine_id,
+                        capability["id"],
+                        RuntimeLeaseStatus.ACTIVE.value,
+                        _new_id("lease-token"),
+                        now,
+                        now,
+                        (now_dt + timedelta(seconds=lease_seconds)).isoformat(),
+                        "{}",
+                    ),
+                )
+                self._conn.execute(
+                    """UPDATE task
+                       SET status = 'preparing', runtime_id = ?, dispatched_at = ?
+                       WHERE id = ?""",
+                    (runtime_machine_id, now, task["id"]),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        taskrun = self.get_taskrun(task["id"])
+        lease = self.get_runtime_lease(lease_id)
+        if taskrun is None or lease is None:
+            raise KeyError("claim was committed but could not be reloaded")
+        return TaskRunClaim(taskrun=taskrun, lease=lease)
+
+    def get_runtime_lease(self, lease_id: str) -> RuntimeLease | None:
+        row = self._conn.execute(
+            "SELECT * FROM runtime_lease WHERE id = ?", (lease_id,)
+        ).fetchone()
+        return self._row_to_runtime_lease(row) if row else None
+
+    def get_active_runtime_lease_for_taskrun(
+        self, taskrun_id: str
+    ) -> RuntimeLease | None:
+        row = self._conn.execute(
+            """SELECT * FROM runtime_lease
+               WHERE taskrun_id = ? AND status = 'active'
+               ORDER BY acquired_at DESC LIMIT 1""",
+            (taskrun_id,),
+        ).fetchone()
+        return self._row_to_runtime_lease(row) if row else None
+
+    def list_runtime_leases(self, taskrun_id: str | None = None) -> list[RuntimeLease]:
+        if taskrun_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM runtime_lease ORDER BY acquired_at"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT * FROM runtime_lease
+                   WHERE taskrun_id = ?
+                   ORDER BY acquired_at""",
+                (taskrun_id,),
+            ).fetchall()
+        return [self._row_to_runtime_lease(r) for r in rows]
+
+    def heartbeat_runtime_lease(
+        self, lease_id: str, lease_seconds: int = 60
+    ) -> RuntimeLease:
+        now_dt = datetime.now(timezone.utc)
+        self._conn.execute(
+            """UPDATE runtime_lease
+               SET last_heartbeat_at = ?, expires_at = ?
+               WHERE id = ? AND status = 'active'""",
+            (
+                now_dt.isoformat(),
+                (now_dt + timedelta(seconds=lease_seconds)).isoformat(),
+                lease_id,
+            ),
+        )
+        self._conn.commit()
+        lease = self.get_runtime_lease(lease_id)
+        if lease is None:
+            raise KeyError(f"runtime lease not found: {lease_id}")
+        return lease
+
+    def release_runtime_lease(self, lease_id: str) -> RuntimeLease:
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE runtime_lease
+               SET status = 'released', released_at = ?
+               WHERE id = ? AND status = 'active'""",
+            (now, lease_id),
+        )
+        self._conn.commit()
+        lease = self.get_runtime_lease(lease_id)
+        if lease is None:
+            raise KeyError(f"runtime lease not found: {lease_id}")
+        return lease
+
+    def revoke_runtime_lease(
+        self, lease_id: str, reason: str = "revoked"
+    ) -> RuntimeLease:
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE runtime_lease
+               SET status = 'revoked', released_at = ?, revoke_reason = ?
+               WHERE id = ? AND status = 'active'""",
+            (now, reason, lease_id),
+        )
+        self._conn.commit()
+        lease = self.get_runtime_lease(lease_id)
+        if lease is None:
+            raise KeyError(f"runtime lease not found: {lease_id}")
+        return lease
+
+    def expire_runtime_leases(self) -> list[RuntimeLease]:
+        now_dt = datetime.now(timezone.utc)
+        rows = self._conn.execute(
+            """SELECT * FROM runtime_lease
+               WHERE status = 'active' AND expires_at < ?
+               ORDER BY expires_at""",
+            (now_dt.isoformat(),),
+        ).fetchall()
+        expired: list[RuntimeLease] = []
+        for row in rows:
+            self._conn.execute(
+                "UPDATE runtime_lease SET status = 'expired' WHERE id = ?",
+                (row["id"],),
+            )
+            task = self.get_task(row["taskrun_id"])
+            if task and task.status in (
+                TaskStatus.PREPARING,
+                TaskStatus.RUNNING,
+                TaskStatus.CLAIMED,
+            ):
+                self._conn.execute(
+                    """UPDATE task
+                       SET status = 'failed', failure_reason = ?,
+                           error = ?, completed_at = ?
+                       WHERE id = ?""",
+                    (
+                        FailureReason.RUNTIME_OFFLINE.value,
+                        "runtime lease expired",
+                        now_dt.isoformat(),
+                        task.id,
+                    ),
+                )
+            expired.append(
+                RuntimeLease(
+                    **{
+                        **self._row_to_runtime_lease(row).model_dump(),
+                        "status": RuntimeLeaseStatus.EXPIRED,
+                    }
+                )
+            )
+        if rows:
+            self._conn.commit()
+        return expired
 
     # ------------------------------------------------------------------
     # Issue
@@ -746,7 +982,12 @@ class Store:
         task = self._load_task(task_id)
         # Cancel is only legal from running (per design doc).
         # But we also allow cancelling queued/claimed for user-initiated cancel.
-        if task.status not in (TaskStatus.QUEUED, TaskStatus.CLAIMED, TaskStatus.RUNNING):
+        if task.status not in (
+            TaskStatus.QUEUED,
+            TaskStatus.PREPARING,
+            TaskStatus.CLAIMED,
+            TaskStatus.RUNNING,
+        ):
             raise InvalidStateTransition(task.status.value, "cancel_task")
         now = _now_iso()
         self._conn.execute(
@@ -756,6 +997,14 @@ class Store:
                WHERE id = ?""",
             (now, task_id),
         )
+        lease = self.get_active_runtime_lease_for_taskrun(task_id)
+        if lease is not None:
+            self._conn.execute(
+                """UPDATE runtime_lease
+                   SET status = 'revoked', released_at = ?, revoke_reason = ?
+                   WHERE id = ?""",
+                (now, "taskrun_cancelled", lease.id),
+            )
         self._conn.commit()
         return self._load_task(task_id)
 

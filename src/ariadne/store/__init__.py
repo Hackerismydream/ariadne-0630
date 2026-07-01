@@ -1,17 +1,12 @@
-"""SQLite persistence layer with atomic state transitions.
+"""SQLite store facade.
 
-The control plane — all task lifecycle operations go through this module.
-No ORM; raw sqlite3 for minimalism and explicit transaction control.
-
-Schema and state machine follow docs/architecture/task-state-machine.md.
+The public `Store` API stays import-compatible while implementation moves into
+lightweight repository and service layers.
 """
 
 from __future__ import annotations
 
 import json
-import logging
-import sqlite3
-import uuid
 from datetime import datetime, timedelta, timezone
 
 from ariadne.models import (
@@ -41,700 +36,20 @@ from ariadne.models import (
     TaskStatus,
 )
 
-logger = logging.getLogger(__name__)
-
-DEFAULT_RUNTIME_MAX_CONCURRENT_TASKRUNS = 4
-DEFAULT_AGENT_PROFILE_MAX_CONCURRENT_TASKRUNS = 1
-
-# ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
-
-
-class InvalidStateTransition(Exception):
-    """Raised when a task state transition is not in the legal transitions table."""
-
-    def __init__(self, current_status: str, attempted_action: str):
-        self.current_status = current_status
-        self.attempted_action = attempted_action
-        super().__init__(
-            f"Cannot {attempted_action} from status '{current_status}'"
-        )
-
-
-class MaxAttemptsExhausted(Exception):
-    """Raised when retry_task is called but attempt >= max_attempts."""
-
-
-# ---------------------------------------------------------------------------
-# Legal transitions
-# ---------------------------------------------------------------------------
-
-# (from_status, to_status) pairs that are legal.
-_LEGAL_TRANSITIONS: set[tuple[TaskStatus, TaskStatus]] = {
-    (TaskStatus.QUEUED, TaskStatus.CLAIMED),
-    (TaskStatus.QUEUED, TaskStatus.PREPARING),
-    (TaskStatus.PREPARING, TaskStatus.RUNNING),
-    (TaskStatus.PREPARING, TaskStatus.FAILED),
-    (TaskStatus.PREPARING, TaskStatus.CANCELLED),
-    (TaskStatus.CLAIMED, TaskStatus.RUNNING),
-    (TaskStatus.CLAIMED, TaskStatus.QUEUED),       # stale claim recovery
-    (TaskStatus.RUNNING, TaskStatus.COMPLETED),
-    (TaskStatus.RUNNING, TaskStatus.FAILED),
-    (TaskStatus.RUNNING, TaskStatus.CANCELLED),
-}
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _new_id(prefix: str) -> str:
-    return f"{prefix}-{uuid.uuid4().hex[:12]}"
-
-
-_ACTIVE_TASK_STATUS_SQL = "'claimed', 'preparing', 'running'"
-
-
-# ---------------------------------------------------------------------------
-# Store
-# ---------------------------------------------------------------------------
-
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS runtime_machine (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    status TEXT NOT NULL
-        CHECK (status IN ('online', 'offline', 'draining', 'disabled')),
-    version TEXT NOT NULL DEFAULT '',
-    device_info TEXT NOT NULL DEFAULT '{}',
-    last_heartbeat_at TEXT,
-    max_concurrent_taskruns INTEGER NOT NULL DEFAULT 4,
-    workspace_root TEXT NOT NULL DEFAULT '',
-    repo_allowlist TEXT NOT NULL DEFAULT '[]',
-    metadata TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS runtime_capability (
-    id TEXT PRIMARY KEY,
-    runtime_machine_id TEXT NOT NULL REFERENCES runtime_machine(id) ON DELETE CASCADE,
-    provider TEXT NOT NULL,
-    command_path TEXT NOT NULL DEFAULT '',
-    version TEXT NOT NULL DEFAULT '',
-    models_json TEXT NOT NULL DEFAULT '[]',
-    status TEXT NOT NULL
-        CHECK (status IN ('available', 'unavailable', 'degraded', 'disabled')),
-    health_error TEXT,
-    default_args_json TEXT NOT NULL DEFAULT '[]',
-    metadata TEXT NOT NULL DEFAULT '{}',
-    last_checked_at TEXT,
-    UNIQUE(runtime_machine_id, provider, command_path)
-);
-
-CREATE TABLE IF NOT EXISTS runtime_lease (
-    id TEXT PRIMARY KEY,
-    taskrun_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
-    runtime_machine_id TEXT NOT NULL REFERENCES runtime_machine(id),
-    runtime_capability_id TEXT NOT NULL REFERENCES runtime_capability(id),
-    status TEXT NOT NULL
-        CHECK (status IN ('active', 'released', 'expired', 'revoked')),
-    lease_token TEXT NOT NULL UNIQUE,
-    acquired_at TEXT NOT NULL,
-    last_heartbeat_at TEXT,
-    released_at TEXT,
-    expires_at TEXT NOT NULL,
-    revoke_reason TEXT,
-    metadata TEXT NOT NULL DEFAULT '{}'
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_lease_one_active
-    ON runtime_lease(taskrun_id) WHERE status = 'active';
-
-CREATE TABLE IF NOT EXISTS issue (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'backlog'
-        CHECK (status IN ('backlog', 'todo', 'in_progress', 'done', 'cancelled')),
-    assignee_type TEXT NOT NULL CHECK (assignee_type IN ('agent', 'squad')),
-    assignee_id TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS issue_timeline_event (
-    id TEXT PRIMARY KEY,
-    issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
-    event_type TEXT NOT NULL,
-    actor_type TEXT NOT NULL,
-    actor_id TEXT,
-    taskrun_id TEXT REFERENCES task(id),
-    runtime_lease_id TEXT REFERENCES runtime_lease(id),
-    leader_decision_id TEXT,
-    comment_id TEXT,
-    payload_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_issue_timeline_issue_time
-    ON issue_timeline_event(issue_id, created_at);
-
-CREATE TABLE IF NOT EXISTS task (
-    id TEXT PRIMARY KEY,
-    issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
-    agent_id TEXT NOT NULL,
-    squad_id TEXT,
-    status TEXT NOT NULL DEFAULT 'queued'
-        CHECK (status IN ('queued', 'preparing', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
-    attempt INTEGER NOT NULL DEFAULT 1,
-    max_attempts INTEGER NOT NULL DEFAULT 2,
-    parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
-    failure_reason TEXT
-        CHECK (failure_reason IS NULL OR failure_reason IN
-               ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery',
-                'manual', 'policy_blocked', 'provider_error', 'test_failure',
-                'routing_failure', 'llm_parse_failure')),
-    dispatched_at TEXT,
-    started_at TEXT,
-    completed_at TEXT,
-    result TEXT,
-    error TEXT,
-    runtime_id TEXT,
-    handoff_prompt TEXT,
-    trace_id TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_task_claim
-    ON task(status, created_at) WHERE status = 'queued';
-
-CREATE TABLE IF NOT EXISTS leader_decision (
-    id TEXT PRIMARY KEY,
-    issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
-    squad_id TEXT NOT NULL REFERENCES squad(id) ON DELETE CASCADE,
-    leader_task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
-    outcome TEXT NOT NULL
-        CHECK (outcome IN ('action', 'no_action', 'failed', 'done')),
-    reason TEXT NOT NULL DEFAULT '',
-    delegation_payload_json TEXT NOT NULL DEFAULT '{}',
-    created_taskrun_ids_json TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_leader_decision_issue_time
-    ON leader_decision(issue_id, created_at);
-
-CREATE TABLE IF NOT EXISTS benchmark_run (
-    id TEXT PRIMARY KEY,
-    suite_name TEXT NOT NULL,
-    case_name TEXT NOT NULL,
-    issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
-    runtime_policy_json TEXT NOT NULL DEFAULT '{}',
-    status TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    completed_at TEXT,
-    summary_json TEXT NOT NULL DEFAULT '{}',
-    artifact_dir TEXT NOT NULL DEFAULT '',
-    metrics_json TEXT NOT NULL DEFAULT '{}'
-);
-
-CREATE INDEX IF NOT EXISTS idx_benchmark_run_suite_case
-    ON benchmark_run(suite_name, case_name, started_at);
-
-CREATE TABLE IF NOT EXISTS activity_log (
-    id TEXT PRIMARY KEY,
-    trace_id TEXT NOT NULL,
-    task_id TEXT,
-    event TEXT NOT NULL,
-    details TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_activity_trace ON activity_log(trace_id);
-
-CREATE TABLE IF NOT EXISTS agent_profile (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    instructions TEXT NOT NULL DEFAULT '',
-    preferred_capabilities_json TEXT NOT NULL DEFAULT '[]',
-    runtime_policy_json TEXT NOT NULL DEFAULT '{}',
-    max_concurrent_taskruns INTEGER NOT NULL DEFAULT 1,
-    status TEXT NOT NULL DEFAULT 'active'
-        CHECK (status IN ('active', 'disabled', 'archived')),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS skill (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT NOT NULL DEFAULT '',
-    when_to_use TEXT NOT NULL DEFAULT '',
-    prompt_snippet TEXT NOT NULL DEFAULT '',
-    tools_allowed_json TEXT NOT NULL DEFAULT '[]',
-    test_command TEXT,
-    source_path TEXT,
-    version TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS agent_profile_skill (
-    agent_profile_id TEXT NOT NULL REFERENCES agent_profile(id) ON DELETE CASCADE,
-    skill_id TEXT NOT NULL REFERENCES skill(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (agent_profile_id, skill_id)
-);
-
-CREATE TABLE IF NOT EXISTS agent (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    instructions TEXT NOT NULL DEFAULT '',
-    backends TEXT NOT NULL DEFAULT '[]',
-    skills TEXT NOT NULL DEFAULT '[]'
-);
-
-CREATE TABLE IF NOT EXISTS squad (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    leader_id TEXT NOT NULL REFERENCES agent(id),
-    instructions TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS squad_member (
-    id TEXT PRIMARY KEY,
-    squad_id TEXT NOT NULL REFERENCES squad(id) ON DELETE CASCADE,
-    member_type TEXT NOT NULL DEFAULT 'agent',
-    member_id TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT '',
-    UNIQUE(squad_id, member_type, member_id)
-);
-"""
-
-
-class Store:
-    """SQLite-backed persistence with atomic state transitions."""
-
-    def __init__(self, db_path: str = "ariadne.db"):
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        if db_path != ":memory:":
-            self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
-        import threading
-        self._lock = threading.Lock()
-
-        self._migrate_task_table_if_needed()
-        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(task)").fetchall()]
-        if "handoff_prompt" not in cols:
-            self._conn.execute("ALTER TABLE task ADD COLUMN handoff_prompt TEXT")
-            self._conn.commit()
-        if "trace_id" not in cols:
-            self._conn.execute("ALTER TABLE task ADD COLUMN trace_id TEXT")
-            self._conn.commit()
-        self._ensure_task_one_active_per_issue_index()
-
-    def close(self) -> None:
-        self._conn.close()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _migrate_task_table_if_needed(self) -> None:
-        row = self._conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'task'"
-        ).fetchone()
-        if row is None:
-            return
-        table_sql = row["sql"] or ""
-        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(task)").fetchall()]
-        needs_rebuild = (
-            "preparing" not in table_sql
-            or "policy_blocked" not in table_sql
-            or "trace_id" not in cols
-            or "test_failure" not in table_sql
-        )
-        if not needs_rebuild:
-            return
-
-        select_exprs = []
-        for column in (
-            "id",
-            "issue_id",
-            "agent_id",
-            "squad_id",
-            "status",
-            "attempt",
-            "max_attempts",
-            "parent_task_id",
-            "failure_reason",
-            "dispatched_at",
-            "started_at",
-            "completed_at",
-            "result",
-            "error",
-            "runtime_id",
-            "handoff_prompt",
-            "trace_id",
-            "created_at",
-        ):
-            select_exprs.append(column if column in cols else f"NULL AS {column}")
-        self._conn.execute("PRAGMA foreign_keys=OFF")
-        self._conn.execute("DROP INDEX IF EXISTS idx_task_claim")
-        self._conn.execute("DROP INDEX IF EXISTS idx_task_one_active_per_issue")
-        self._conn.execute(
-            """CREATE TABLE task_new (
-                id TEXT PRIMARY KEY,
-                issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
-                agent_id TEXT NOT NULL,
-                squad_id TEXT,
-                status TEXT NOT NULL DEFAULT 'queued'
-                    CHECK (status IN ('queued', 'preparing', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
-                attempt INTEGER NOT NULL DEFAULT 1,
-                max_attempts INTEGER NOT NULL DEFAULT 2,
-                parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
-                failure_reason TEXT
-                    CHECK (failure_reason IS NULL OR failure_reason IN
-                           ('agent_error', 'timeout', 'runtime_offline',
-                            'runtime_recovery', 'manual', 'policy_blocked',
-                            'provider_error', 'test_failure', 'routing_failure',
-                            'llm_parse_failure')),
-                dispatched_at TEXT,
-                started_at TEXT,
-                completed_at TEXT,
-                result TEXT,
-                error TEXT,
-                runtime_id TEXT,
-                handoff_prompt TEXT,
-                trace_id TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )"""
-        )
-        self._conn.execute(
-            f"""INSERT INTO task_new
-               (id, issue_id, agent_id, squad_id, status, attempt, max_attempts,
-                parent_task_id, failure_reason, dispatched_at, started_at,
-                completed_at, result, error, runtime_id, handoff_prompt,
-                trace_id, created_at)
-               SELECT {", ".join(select_exprs)} FROM task"""
-        )
-        self._conn.execute("DROP TABLE task")
-        self._conn.execute("ALTER TABLE task_new RENAME TO task")
-        self._conn.execute(
-            """CREATE INDEX IF NOT EXISTS idx_task_claim
-               ON task(status, created_at) WHERE status = 'queued'"""
-        )
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.commit()
-
-    def _ensure_task_one_active_per_issue_index(self) -> None:
-        """Enforce one active task per issue without breaking legacy databases."""
-        duplicates = self._conn.execute(
-            f"""SELECT issue_id, COUNT(*) AS active_count
-                FROM task
-                WHERE status IN ({_ACTIVE_TASK_STATUS_SQL})
-                GROUP BY issue_id
-                HAVING active_count > 1"""
-        ).fetchall()
-        for duplicate in duplicates:
-            rows = self._conn.execute(
-                f"""SELECT id FROM task
-                    WHERE issue_id = ?
-                      AND status IN ({_ACTIVE_TASK_STATUS_SQL})
-                    ORDER BY COALESCE(started_at, dispatched_at, created_at), id""",
-                (duplicate["issue_id"],),
-            ).fetchall()
-            keep_id = rows[0]["id"]
-            failed_ids = [row["id"] for row in rows[1:]]
-            logger.warning(
-                "resolving duplicate active tasks for one issue: "
-                "issue_id=%s keeping=%s failing=%s",
-                duplicate["issue_id"],
-                keep_id,
-                failed_ids,
-            )
-            now = _now_iso()
-            placeholders = ", ".join("?" for _ in failed_ids)
-            self._conn.execute(
-                f"""UPDATE task
-                    SET status = 'failed',
-                        failure_reason = 'runtime_recovery',
-                        error = ?,
-                        completed_at = ?
-                    WHERE id IN ({placeholders})""",
-                (
-                    "migration deactivated duplicate active task for "
-                    "per-issue serialization",
-                    now,
-                    *failed_ids,
-                ),
-            )
-            self._conn.execute(
-                f"""UPDATE runtime_lease
-                    SET status = 'revoked',
-                        released_at = ?,
-                        revoke_reason = 'per_issue_serialization_migration'
-                    WHERE status = 'active'
-                      AND taskrun_id IN ({placeholders})""",
-                (now, *failed_ids),
-            )
-        if duplicates:
-            self._conn.commit()
-
-        self._conn.execute(
-            f"""CREATE UNIQUE INDEX IF NOT EXISTS idx_task_one_active_per_issue
-                ON task(issue_id)
-                WHERE status IN ({_ACTIVE_TASK_STATUS_SQL})"""
-        )
-        self._conn.commit()
-
-    @staticmethod
-    def _row_to_task(row: sqlite3.Row) -> Task:
-        result_raw = row["result"]
-        return Task(
-            id=row["id"],
-            issue_id=row["issue_id"],
-            agent_id=row["agent_id"],
-            squad_id=row["squad_id"],
-            status=TaskStatus(row["status"]),
-            attempt=row["attempt"],
-            max_attempts=row["max_attempts"],
-            parent_task_id=row["parent_task_id"],
-            failure_reason=FailureReason(row["failure_reason"])
-            if row["failure_reason"]
-            else None,
-            dispatched_at=datetime.fromisoformat(row["dispatched_at"])
-            if row["dispatched_at"]
-            else None,
-            started_at=datetime.fromisoformat(row["started_at"])
-            if row["started_at"]
-            else None,
-            completed_at=datetime.fromisoformat(row["completed_at"])
-            if row["completed_at"]
-            else None,
-            result=json.loads(result_raw) if result_raw else None,
-            error=row["error"],
-            runtime_id=row["runtime_id"],
-            handoff_prompt=row["handoff_prompt"] if "handoff_prompt" in row.keys() else None,
-            trace_id=row["trace_id"] if "trace_id" in row.keys() else None,
-            created_at=datetime.fromisoformat(row["created_at"]),
-        )
-
-    @staticmethod
-    def _row_to_taskrun(row: sqlite3.Row) -> TaskRun:
-        task = Store._row_to_task(row)
-        return TaskRun(**task.model_dump())
-
-    @staticmethod
-    def _row_to_issue(row: sqlite3.Row) -> Issue:
-        return Issue(
-            id=row["id"],
-            title=row["title"],
-            description=row["description"],
-            status=IssueStatus(row["status"]),
-            assignee_type=AssigneeType(row["assignee_type"]),
-            assignee_id=row["assignee_id"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-        )
-
-    @staticmethod
-    def _row_to_issue_timeline_event(row: sqlite3.Row) -> IssueTimelineEvent:
-        return IssueTimelineEvent(
-            id=row["id"],
-            issue_id=row["issue_id"],
-            event_type=row["event_type"],
-            actor_type=row["actor_type"],
-            actor_id=row["actor_id"],
-            taskrun_id=row["taskrun_id"],
-            runtime_lease_id=row["runtime_lease_id"],
-            leader_decision_id=row["leader_decision_id"],
-            comment_id=row["comment_id"],
-            payload=json.loads(row["payload_json"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-        )
-
-    @staticmethod
-    def _row_to_leader_decision(row: sqlite3.Row) -> LeaderDecision:
-        return LeaderDecision(
-            id=row["id"],
-            issue_id=row["issue_id"],
-            squad_id=row["squad_id"],
-            leader_task_id=row["leader_task_id"],
-            outcome=LeaderDecisionOutcome(row["outcome"]),
-            reason=row["reason"],
-            delegation_payload=json.loads(row["delegation_payload_json"]),
-            created_taskrun_ids=json.loads(row["created_taskrun_ids_json"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-        )
-
-    @staticmethod
-    def _row_to_benchmark_run(row: sqlite3.Row) -> BenchmarkRun:
-        return BenchmarkRun(
-            id=row["id"],
-            suite_name=row["suite_name"],
-            case_name=row["case_name"],
-            issue_id=row["issue_id"],
-            runtime_policy=json.loads(row["runtime_policy_json"]),
-            status=row["status"],
-            started_at=datetime.fromisoformat(row["started_at"]),
-            completed_at=datetime.fromisoformat(row["completed_at"])
-            if row["completed_at"]
-            else None,
-            summary=json.loads(row["summary_json"]),
-            artifact_dir=row["artifact_dir"],
-            metrics=json.loads(row["metrics_json"]),
-        )
-
-    @staticmethod
-    def _row_to_runtime_machine(row: sqlite3.Row) -> RuntimeMachine:
-        return RuntimeMachine(
-            id=row["id"],
-            name=row["name"],
-            status=RuntimeMachineStatus(row["status"]),
-            version=row["version"],
-            device_info=json.loads(row["device_info"]),
-            last_heartbeat_at=datetime.fromisoformat(row["last_heartbeat_at"])
-            if row["last_heartbeat_at"]
-            else None,
-            max_concurrent_taskruns=row["max_concurrent_taskruns"],
-            workspace_root=row["workspace_root"],
-            repo_allowlist=json.loads(row["repo_allowlist"]),
-            metadata=json.loads(row["metadata"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
-
-    @staticmethod
-    def _row_to_runtime_capability(row: sqlite3.Row) -> RuntimeCapability:
-        return RuntimeCapability(
-            id=row["id"],
-            runtime_machine_id=row["runtime_machine_id"],
-            provider=row["provider"],
-            command_path=row["command_path"],
-            version=row["version"],
-            models=json.loads(row["models_json"]),
-            status=RuntimeCapabilityStatus(row["status"]),
-            health_error=row["health_error"],
-            default_args=json.loads(row["default_args_json"]),
-            metadata=json.loads(row["metadata"]),
-            last_checked_at=datetime.fromisoformat(row["last_checked_at"])
-            if row["last_checked_at"]
-            else None,
-        )
-
-    @staticmethod
-    def _row_to_runtime_lease(row: sqlite3.Row) -> RuntimeLease:
-        return RuntimeLease(
-            id=row["id"],
-            taskrun_id=row["taskrun_id"],
-            runtime_machine_id=row["runtime_machine_id"],
-            runtime_capability_id=row["runtime_capability_id"],
-            status=RuntimeLeaseStatus(row["status"]),
-            lease_token=row["lease_token"],
-            acquired_at=datetime.fromisoformat(row["acquired_at"]),
-            last_heartbeat_at=datetime.fromisoformat(row["last_heartbeat_at"])
-            if row["last_heartbeat_at"]
-            else None,
-            released_at=datetime.fromisoformat(row["released_at"])
-            if row["released_at"]
-            else None,
-            expires_at=datetime.fromisoformat(row["expires_at"]),
-            revoke_reason=row["revoke_reason"],
-            metadata=json.loads(row["metadata"]),
-        )
-
-    @staticmethod
-    def _row_to_agent_profile(row: sqlite3.Row) -> AgentProfile:
-        return AgentProfile(
-            id=row["id"],
-            name=row["name"],
-            description=row["description"],
-            instructions=row["instructions"],
-            preferred_capabilities=json.loads(row["preferred_capabilities_json"]),
-            runtime_policy=json.loads(row["runtime_policy_json"]),
-            max_concurrent_taskruns=row["max_concurrent_taskruns"],
-            status=AgentProfileStatus(row["status"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
-
-    @staticmethod
-    def _row_to_skill(row: sqlite3.Row) -> Skill:
-        return Skill(
-            id=row["id"],
-            name=row["name"],
-            description=row["description"],
-            when_to_use=row["when_to_use"],
-            prompt_snippet=row["prompt_snippet"],
-            tools_allowed=json.loads(row["tools_allowed_json"]),
-            test_command=row["test_command"],
-            source_path=row["source_path"],
-            version=row["version"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
-
-    @staticmethod
-    def _row_to_agent(row: sqlite3.Row) -> Agent:
-        return Agent(
-            id=row["id"],
-            name=row["name"],
-            instructions=row["instructions"],
-            backends=json.loads(row["backends"]),
-            skills=json.loads(row["skills"]),
-        )
-
-    @staticmethod
-    def _row_to_squad(row: sqlite3.Row) -> Squad:
-        return Squad(
-            id=row["id"],
-            name=row["name"],
-            leader_id=row["leader_id"],
-            instructions=row["instructions"],
-        )
-
-    @staticmethod
-    def _row_to_squad_member(row: sqlite3.Row) -> SquadMember:
-        return SquadMember(
-            squad_id=row["squad_id"],
-            member_type=row["member_type"],
-            member_id=row["member_id"],
-            role=row["role"],
-        )
-
-    def _load_task(self, task_id: str) -> Task:
-        row = self._conn.execute(
-            "SELECT * FROM task WHERE id = ?", (task_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError(f"task not found: {task_id}")
-        return self._row_to_task(row)
-
-    def _check_transition(
-        self, current: TaskStatus, target: TaskStatus, action: str
-    ) -> None:
-        if (current, target) not in _LEGAL_TRANSITIONS:
-            raise InvalidStateTransition(current.value, action)
-
-    def _agent_capacity_available(self, agent_id: str) -> bool:
-        profile = self._conn.execute(
-            "SELECT max_concurrent_taskruns FROM agent_profile WHERE id = ?",
-            (agent_id,),
-        ).fetchone()
-        if profile is None:
-            return True
-        active_for_profile = self._conn.execute(
-            f"""SELECT COUNT(*) FROM task
-                WHERE agent_id = ?
-                  AND status IN ({_ACTIVE_TASK_STATUS_SQL})""",
-            (agent_id,),
-        ).fetchone()[0]
-        return active_for_profile < profile["max_concurrent_taskruns"]
+from .base import (
+    DEFAULT_AGENT_PROFILE_MAX_CONCURRENT_TASKRUNS,
+    DEFAULT_RUNTIME_MAX_CONCURRENT_TASKRUNS,
+    _ACTIVE_TASK_STATUS_SQL,
+    _new_id,
+    _now_iso,
+    InvalidStateTransition,
+    MaxAttemptsExhausted,
+    StoreBase,
+)
+
+
+class Store(StoreBase):
+    """Backward-compatible facade over the lightweight store layers."""
 
     # ------------------------------------------------------------------
     # RuntimeMachine / RuntimeCapability
@@ -811,13 +126,13 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM runtime_machine WHERE id = ?", (runtime_machine_id,)
         ).fetchone()
-        return self._row_to_runtime_machine(row) if row else None
+        return self.row_to(RuntimeMachine, row) if row else None
 
     def list_runtime_machines(self) -> list[RuntimeMachine]:
         rows = self._conn.execute(
             "SELECT * FROM runtime_machine ORDER BY name"
         ).fetchall()
-        return [self._row_to_runtime_machine(r) for r in rows]
+        return [self.row_to(RuntimeMachine, r) for r in rows]
 
     def upsert_runtime_capability(
         self,
@@ -870,7 +185,7 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM runtime_capability WHERE id = ?", (capability_id,)
         ).fetchone()
-        return self._row_to_runtime_capability(row)
+        return self.row_to(RuntimeCapability, row)
 
     def list_runtime_capabilities(
         self, runtime_machine_id: str | None = None
@@ -886,13 +201,13 @@ class Store:
                    ORDER BY provider""",
                 (runtime_machine_id,),
             ).fetchall()
-        return [self._row_to_runtime_capability(r) for r in rows]
+        return [self.row_to(RuntimeCapability, r) for r in rows]
 
     def get_runtime_capability(self, capability_id: str) -> RuntimeCapability | None:
         row = self._conn.execute(
             "SELECT * FROM runtime_capability WHERE id = ?", (capability_id,)
         ).fetchone()
-        return self._row_to_runtime_capability(row) if row else None
+        return self.row_to(RuntimeCapability, row) if row else None
 
     def set_runtime_capability_status(
         self,
@@ -913,7 +228,7 @@ class Store:
         ).fetchone()
         if row is None:
             raise KeyError(f"runtime capability not found: {capability_id}")
-        return self._row_to_runtime_capability(row)
+        return self.row_to(RuntimeCapability, row)
 
     def claim_taskrun_for_runtime_machine(
         self,
@@ -1054,7 +369,7 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM runtime_lease WHERE id = ?", (lease_id,)
         ).fetchone()
-        return self._row_to_runtime_lease(row) if row else None
+        return self.row_to(RuntimeLease, row) if row else None
 
     def get_active_runtime_lease_for_taskrun(
         self, taskrun_id: str
@@ -1065,7 +380,7 @@ class Store:
                ORDER BY acquired_at DESC LIMIT 1""",
             (taskrun_id,),
         ).fetchone()
-        return self._row_to_runtime_lease(row) if row else None
+        return self.row_to(RuntimeLease, row) if row else None
 
     def list_runtime_leases(self, taskrun_id: str | None = None) -> list[RuntimeLease]:
         if taskrun_id is None:
@@ -1079,7 +394,7 @@ class Store:
                    ORDER BY acquired_at""",
                 (taskrun_id,),
             ).fetchall()
-        return [self._row_to_runtime_lease(r) for r in rows]
+        return [self.row_to(RuntimeLease, r) for r in rows]
 
     def heartbeat_runtime_lease(
         self, lease_id: str, lease_seconds: int = 60
@@ -1204,7 +519,7 @@ class Store:
             expired.append(
                 RuntimeLease(
                     **{
-                        **self._row_to_runtime_lease(row).model_dump(),
+                        **self.row_to(RuntimeLease, row).model_dump(),
                         "status": RuntimeLeaseStatus.EXPIRED,
                     }
                 )
@@ -1255,7 +570,7 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM issue_timeline_event WHERE id = ?", (event_id,)
         ).fetchone()
-        return self._row_to_issue_timeline_event(row)
+        return self.row_to(IssueTimelineEvent, row)
 
     def get_issue_timeline(self, issue_id: str) -> list[IssueTimelineEvent]:
         rows = self._conn.execute(
@@ -1264,7 +579,7 @@ class Store:
                ORDER BY created_at, id""",
             (issue_id,),
         ).fetchall()
-        return [self._row_to_issue_timeline_event(r) for r in rows]
+        return [self.row_to(IssueTimelineEvent, r) for r in rows]
 
     def record_leader_decision(
         self,
@@ -1318,7 +633,7 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM leader_decision WHERE id = ?", (decision_id,)
         ).fetchone()
-        return self._row_to_leader_decision(row) if row else None
+        return self.row_to(LeaderDecision, row) if row else None
 
     def list_leader_decisions(self, issue_id: str | None = None) -> list[LeaderDecision]:
         if issue_id is None:
@@ -1332,7 +647,7 @@ class Store:
                    ORDER BY created_at, id""",
                 (issue_id,),
             ).fetchall()
-        return [self._row_to_leader_decision(r) for r in rows]
+        return [self.row_to(LeaderDecision, r) for r in rows]
 
     def create_benchmark_run(
         self,
@@ -1397,13 +712,13 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM benchmark_run WHERE id = ?", (benchmark_run_id,)
         ).fetchone()
-        return self._row_to_benchmark_run(row) if row else None
+        return self.row_to(BenchmarkRun, row) if row else None
 
     def list_benchmark_runs(self) -> list[BenchmarkRun]:
         rows = self._conn.execute(
             "SELECT * FROM benchmark_run ORDER BY started_at DESC, id DESC"
         ).fetchall()
-        return [self._row_to_benchmark_run(r) for r in rows]
+        return [self.row_to(BenchmarkRun, r) for r in rows]
 
     def create_issue(
         self,
@@ -1447,11 +762,11 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM issue WHERE id = ?", (issue_id,)
         ).fetchone()
-        return self._row_to_issue(row) if row else None
+        return self.row_to(Issue, row) if row else None
 
     def list_issues(self) -> list[Issue]:
         rows = self._conn.execute("SELECT * FROM issue ORDER BY created_at").fetchall()
-        return [self._row_to_issue(r) for r in rows]
+        return [self.row_to(Issue, r) for r in rows]
 
     def update_issue_status(self, issue_id: str, status: IssueStatus) -> Issue:
         self._conn.execute(
@@ -1593,7 +908,7 @@ class Store:
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
-            return self._row_to_task(
+            return self.row_to(Task, 
                 self._conn.execute(
                     "SELECT * FROM task WHERE id = ?", (row["id"],)
                 ).fetchone()
@@ -1802,17 +1117,17 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM task WHERE id = ?", (task_id,)
         ).fetchone()
-        return self._row_to_task(row) if row else None
+        return self.row_to(Task, row) if row else None
 
     def get_taskrun(self, taskrun_id: str) -> TaskRun | None:
         row = self._conn.execute(
             "SELECT * FROM task WHERE id = ?", (taskrun_id,)
         ).fetchone()
-        return self._row_to_taskrun(row) if row else None
+        return self.row_to(TaskRun, row) if row else None
 
     def list_taskruns(self) -> list[TaskRun]:
         rows = self._conn.execute("SELECT * FROM task ORDER BY created_at DESC").fetchall()
-        return [self._row_to_taskrun(r) for r in rows]
+        return [self.row_to(TaskRun, r) for r in rows]
 
     def get_pending_member_tasks(self, squad_id: str) -> list[Task]:
         """Return non-terminal tasks belonging to squad members (not the leader)."""
@@ -1823,7 +1138,7 @@ class Store:
                ORDER BY created_at""",
             (squad_id,),
         ).fetchall()
-        return [self._row_to_task(r) for r in rows]
+        return [self.row_to(Task, r) for r in rows]
 
     def recover_stale_claims(self, stale_timeout_seconds: float = 60.0) -> int:
         """Move claimed tasks with no heartbeat for stale_timeout back to queued.
@@ -1916,13 +1231,13 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM agent_profile WHERE id = ?", (agent_profile_id,)
         ).fetchone()
-        return self._row_to_agent_profile(row) if row else None
+        return self.row_to(AgentProfile, row) if row else None
 
     def list_agent_profiles(self) -> list[AgentProfile]:
         rows = self._conn.execute(
             "SELECT * FROM agent_profile ORDER BY name"
         ).fetchall()
-        return [self._row_to_agent_profile(r) for r in rows]
+        return [self.row_to(AgentProfile, r) for r in rows]
 
     def create_skill(
         self,
@@ -1976,20 +1291,20 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM skill WHERE id = ?", (skill_id,)
         ).fetchone()
-        return self._row_to_skill(row) if row else None
+        return self.row_to(Skill, row) if row else None
 
     def get_skill_by_name(self, name: str) -> Skill | None:
         row = self._conn.execute(
             "SELECT * FROM skill WHERE name = ?", (name,)
         ).fetchone()
-        return self._row_to_skill(row) if row else None
+        return self.row_to(Skill, row) if row else None
 
     def resolve_skill(self, skill_id_or_name: str) -> Skill | None:
         return self.get_skill(skill_id_or_name) or self.get_skill_by_name(skill_id_or_name)
 
     def list_skills(self) -> list[Skill]:
         rows = self._conn.execute("SELECT * FROM skill ORDER BY name").fetchall()
-        return [self._row_to_skill(r) for r in rows]
+        return [self.row_to(Skill, r) for r in rows]
 
     def bind_skill_to_agent_profile(
         self, agent_profile_id: str, skill_id_or_name: str
@@ -2019,7 +1334,7 @@ class Store:
                ORDER BY skill.name""",
             (agent_profile_id,),
         ).fetchall()
-        return [self._row_to_skill(r) for r in rows]
+        return [self.row_to(Skill, r) for r in rows]
 
     def _sync_legacy_agent_from_profile(self, agent_profile_id: str) -> None:
         profile = self.get_agent_profile(agent_profile_id)
@@ -2101,11 +1416,11 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM agent WHERE id = ?", (agent_id,)
         ).fetchone()
-        return self._row_to_agent(row) if row else None
+        return self.row_to(Agent, row) if row else None
 
     def list_agents(self) -> list[Agent]:
         rows = self._conn.execute("SELECT * FROM agent ORDER BY name").fetchall()
-        return [self._row_to_agent(r) for r in rows]
+        return [self.row_to(Agent, r) for r in rows]
 
     # ------------------------------------------------------------------
     # Squad
@@ -2149,13 +1464,13 @@ class Store:
         row = self._conn.execute(
             "SELECT * FROM squad WHERE id = ?", (squad_id,)
         ).fetchone()
-        return self._row_to_squad(row) if row else None
+        return self.row_to(Squad, row) if row else None
 
     def get_squad_members(self, squad_id: str) -> list[SquadMember]:
         rows = self._conn.execute(
             "SELECT * FROM squad_member WHERE squad_id = ?", (squad_id,)
         ).fetchall()
-        return [self._row_to_squad_member(r) for r in rows]
+        return [self.row_to(SquadMember, r) for r in rows]
 
     def get_squad_leader(self, squad_id: str) -> Agent:
         squad = self.get_squad(squad_id)

@@ -5,7 +5,7 @@
 | Item | Status |
 |------|--------|
 | Backend registry seam | `register_backend()`, `get_backend()`, and `available_backends()` support in-process extension without editing the built-in registry literal. |
-| Truthful single-vs-squad benchmark comparison | `ariadne benchmark-compare` reports `simulated: true` for dry-run and `blocked` for real backends until external execution is explicitly enabled. |
+| Truthful single-vs-squad benchmark comparison | `ariadne benchmark-compare` reports `simulated: true` for dry-run. Real backend mode runs the requested backend against a temporary workspace and reports provider availability or execution failure as first-class results. |
 | Backend session resume | Daemon passes the latest same-trace or parent TaskRun `session_id` into `ExecutionContext.resume_session_id`. |
 | MCP config injection | Agent-profile `runtime_policy["mcp_config_path"]` or `ARIADNE_MCP_CONFIG` flows into backend command rendering. |
 | First-class Skill materialization | Skills persist routing description, prompt content, allowed tools, verification command, source path, and version; TaskRun handoffs include a capability package. |

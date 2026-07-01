@@ -122,35 +122,27 @@ def on_member_task_complete(task: Task):
     # else: wait for remaining members
 ```
 
-## LangGraph Integration
+## Leader Activation
 
-The leader's single activation is modeled as a LangGraph supervisor graph:
+The current implementation uses a plain Python leader activation, not a graph
+runtime. The leader is called once per activation with:
+
+- the generated `SquadBriefing`
+- the Issue
+- completed member results for re-evaluation turns
+
+The decision is coerced into a persisted `LeaderDecision`:
 
 ```
-        ┌───────────┐
-        │   START    │
-        └─────┬──────┘
-              ▼
-        ┌───────────┐
-        │  leader   │  read briefing + issue → output DelegationDecision
-        │  (node)   │
-        └─────┬─────┘
-              │ conditional edge: has delegation?
-         ┌────┴────┐
-         ▼         ▼
-    ┌─────────┐  ┌──────┐
-    │ delegate │  │ done │  (no more work, mark issue done)
-    │ (node)   │  └──────┘
-    └─────┬───┘
-          │ creates child task(s)
-          ▼
-      ┌────────┐
-      │  END   │
-      └────────┘
+leader activation
+  ├─ action    → validate delegation, enqueue member TaskRun, complete leader
+  ├─ no_action → record decision, complete leader
+  ├─ failed    → fail leader TaskRun
+  └─ done      → mark Issue done, complete leader
 ```
 
-The graph runs **once per leader activation**, not once per issue lifecycle.
-The event loop (outside LangGraph) controls when to re-invoke the graph.
+This keeps the control plane explicit and testable. A graph runtime can be
+revisited later if leader reasoning becomes multi-step enough to justify it.
 
 ## Squad Model
 

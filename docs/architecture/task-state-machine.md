@@ -7,7 +7,8 @@
 
 Durable task lifecycle management. A task is one execution attempt of an issue
 by an agent. The state machine guarantees: atomic claim (no double-execution),
-explicit failure classification, retry chain via `parent_task_id`.
+one active task per issue, runtime/profile capacity limits, explicit failure
+classification, retry chain via `parent_task_id`.
 
 ## States
 
@@ -45,6 +46,8 @@ explicit failure classification, retry chain via `parent_task_id`.
 | From | To | Trigger | Actor |
 |------|----|---------|-------|
 | queued | claimed | `claim_task(runtime_id)` | daemon |
+| queued | preparing | `claim_taskrun_for_runtime_machine(runtime_id)` | runtime daemon |
+| preparing | running | `start_taskrun(taskrun_id)` | runtime daemon |
 | claimed | running | `start_task(task_id)` | daemon |
 | claimed | queued | claim timeout / daemon restart | daemon recovery |
 | running | completed | `complete_task(task_id, result)` | daemon |
@@ -71,6 +74,7 @@ explicit failure classification, retry chain via `parent_task_id`.
 ```python
 class TaskStatus(str, Enum):
     QUEUED = "queued"
+    PREPARING = "preparing"
     CLAIMED = "claimed"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -148,13 +152,16 @@ CREATE TABLE task (
     agent_id TEXT NOT NULL,
     squad_id TEXT,
     status TEXT NOT NULL DEFAULT 'queued'
-        CHECK (status IN ('queued', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
+        CHECK (status IN ('queued', 'preparing', 'claimed', 'running',
+                          'completed', 'failed', 'cancelled')),
     attempt INTEGER NOT NULL DEFAULT 1,
     max_attempts INTEGER NOT NULL DEFAULT 2,
     parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
     failure_reason TEXT
         CHECK (failure_reason IS NULL OR failure_reason IN
-               ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery', 'manual')),
+               ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery',
+                'manual', 'policy_blocked', 'provider_error', 'test_failure',
+                'routing_failure', 'llm_parse_failure')),
     dispatched_at TEXT,
     started_at TEXT,
     completed_at TEXT,
@@ -166,6 +173,11 @@ CREATE TABLE task (
 
 -- Atomic claim: only one daemon can claim a queued task
 CREATE INDEX idx_task_claim ON task(status, created_at) WHERE status = 'queued';
+
+-- Issue serialization: only one active task may edit an issue at a time
+CREATE UNIQUE INDEX idx_task_one_active_per_issue
+    ON task(issue_id)
+    WHERE status IN ('claimed', 'preparing', 'running');
 ```
 
 ## Atomic Claim Contract
@@ -176,14 +188,23 @@ BEGIN IMMEDIATE;
   UPDATE task SET status = 'claimed', runtime_id = ?, dispatched_at = datetime('now')
   WHERE id = (
     SELECT id FROM task WHERE status = 'queued' AND agent_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM task AS active
+        WHERE active.issue_id = task.issue_id
+          AND active.status IN ('claimed', 'preparing', 'running')
+      )
     ORDER BY created_at LIMIT 1
   )
   RETURNING *;
 COMMIT;
 ```
 
-If two daemons race, `BEGIN IMMEDIATE` serializes them. The `RETURNING` clause
-gives the winner the claimed task; the loser gets nothing.
+If two daemons race, `BEGIN IMMEDIATE` serializes them. The active-per-issue
+partial unique index is the invariant backstop; claim queries also skip issues
+that already have an active sibling. RuntimeMachine claim additionally checks
+the active RuntimeLease count against `runtime_machine.max_concurrent_taskruns`
+and the active task count for an AgentProfile against
+`agent_profile.max_concurrent_taskruns`.
 
 ## Extension Points
 
@@ -198,6 +219,9 @@ gives the winner the claimed task; the loser gets nothing.
 | `test_legal_transitions` | Every legal transition succeeds and updates timestamps |
 | `test_illegal_transitions` | Every illegal transition raises `InvalidStateTransition` |
 | `test_atomic_claim` | Two concurrent claims on same task → only one succeeds |
+| `test_claim_task_serializes_active_tasks_per_issue` | Same issue cannot have two active tasks |
+| `test_runtime_machine_claim_respects_runtime_capacity` | RuntimeMachine capacity blocks excess claims |
+| `test_runtime_machine_claim_respects_agent_profile_capacity` | AgentProfile capacity blocks excess claims |
 | `test_retry_creates_new_task` | `retry_task` creates new task with `parent_task_id` set, `attempt` incremented |
 | `test_max_attempts_exhausted` | After `max_attempts` failures, no auto-retry, `failure_reason` set |
 | `test_failure_classification` | Each `FailureReason` maps to correct retry behavior |

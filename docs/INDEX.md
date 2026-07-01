@@ -26,6 +26,15 @@ them in Python. Not a translation — an architecture extraction.
 | architecture | [dashboard-layout.md](architecture/dashboard-layout.md) | Web dashboard layout |
 | architecture | [multica-mapping.md](architecture/multica-mapping.md) | Each mechanism → multica source file it derives from |
 
+## Decision Records
+
+| ADR | Decision |
+|-----|----------|
+| [0010](adr/0010-open-execution-backend-registry.md) | Open in-process backend registry |
+| [0011](adr/0011-provider-session-resume-and-mcp-config.md) | Provider session resume and MCP config injection |
+| [0012](adr/0012-skills-as-capability-packages.md) | Skills as materialized capability packages |
+| [0013](adr/0013-isolation-first-real-backend-execution.md) | Isolation-first real backend execution |
+
 ## Delivery Plan
 
 | Doc | Purpose |

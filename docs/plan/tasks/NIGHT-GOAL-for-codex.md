@@ -33,10 +33,11 @@
 
 ## 护栏（HARD LIMITS — 违反即停）
 
-### 💰 Token / 真实执行安全（无人值守最关键）
-- **联调默认 dry-run backend**。dry-run 零 token、零真实文件改动，闭环验证足够。
-- 真实 codex/claude backend **最多跑一次小规模冒烟**（1-2 个任务，验证真实 backend 能通），**不要**拿真实 backend 反复联调/压测。用户睡觉时不能无监督烧 token。
-- 真实 backend 冒烟必须在**隔离 worktree**（deep-006 默认隔离已保证），绝不 `--write-workspace` 写主仓库。
+### 🔥 真实 backend 授权（用户明确要求：放开烧 token 把产品做出来）
+- **鼓励用真实 codex/claude backend 深度联调**，跑通真实端到端：真实建 issue → 真实 agent 执行 → 真实 diff → 前端真实展示。dry-run 只用于快速回归，**产品是否真能用要靠真实 backend 证明**。
+- 用户明确授权无人值守烧 token，token 不是约束。目标是产品真正跑起来，不是省钱。
+- **但真实执行必须隔离**（这条与省钱无关，是保护主仓库）：真实 backend 一律在**隔离 git worktree** 跑（deep-006 默认隔离已保证），**绝不** `--write-workspace` 写主仓库。一夜无监督执行不能污染主工作区。
+- 真实 backend 跑出的**性能/加速比数字如实记录进 NIGHT-REPORT.md**（标注真实环境），这正好补上 M4 的真实 benchmark——但只记真实跑出来的，不估算、不编造。
 
 ### 🚧 runtime 优化是"有界"的，不是开放重构
 - **只修**：测试红的、联调暴露的、明确的 bug（如竞态、资源泄漏、错误吞掉、状态机漏转移）。
@@ -61,11 +62,11 @@
 - 完成了什么（前端页面、联调结果、修了哪些 bug、runtime 改了什么）
 - 每个 bug：怎么复现的、根因、怎么修的、测试证明
 - **卡住/不确定/需要人决策的**（尤其边界问题、真实 backend 的表现）
-- 哪些数字是 dry-run（真实 benchmark 仍待用户本人跑，别编造真实性能数字）
+- 哪些数字来自真实 backend、哪些是 dry-run（如实标注；真实的就记真实值，不编造/不估算）
 - 当前测试数 + ruff 状态 + 前端 build 状态
 
 ## 绝不做（醒来不想看到的）
-- 不无监督反复烧真实 backend token。
+- 真实 backend 执行绝不写主仓库（必须隔离 worktree）。
 - 不为凑绿删测试、改弱断言。
 - 不主动重构没坏的 runtime。
 - 不编造真实性能数字（dry-run 就标 dry-run）。

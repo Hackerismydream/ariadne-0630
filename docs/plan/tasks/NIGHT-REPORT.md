@@ -59,6 +59,25 @@ latest visual smoke screenshot is `/tmp/ariadne-detail.png`.
 
 ## Bugs Found And Fixed
 
+### 0. Frontend Used The Wrong Claude Backend Name
+
+Reproduction: while preparing real-provider validation, the frontend backend
+selector exposed `claude`, but Ariadne's registered backend id is
+`claude-code`. Selecting Claude from the UI would send an unregistered backend
+name.
+
+Fix: centralized frontend backend names as
+`["dry-run", "codex", "claude-code"]` and rendered the selector from that list.
+
+Proof:
+
+```bash
+cd frontend && npm test
+# 4 passed
+```
+
+New regression: `uses backend names registered by the Python runtime`.
+
 ### 1. SSE Stream Used A Sync Generator
 
 Reproduction: an EventSource connection to `/api/events` kept a synchronous
@@ -113,6 +132,79 @@ cd frontend && npm run test:e2e -- --reporter=line
 # 1 passed
 ```
 
+## Real Backend Validation
+
+### Codex CLI Through Ariadne Runner
+
+Target repo: `/tmp/ariadne-real-backend-target`, a disposable git repository
+with one committed `README.md`.
+
+Command:
+
+```bash
+ARIADNE_DB=/tmp/ariadne-real-backend.db uv run ariadne run \
+  "Edit README.md by adding one sentence: Codex real backend smoke passed." \
+  --backend codex \
+  --target-repo /tmp/ariadne-real-backend-target \
+  --max-iterations 4
+```
+
+Observed result:
+
+- issue: `issue-c752f3b1d7f8`
+- taskrun: `taskrun-e0940a1fec97`
+- status: `completed`
+- provider: `codex`
+- duration: `38.156974666999304` seconds
+- changed files: `["README.md"]`
+- captured diff: added `Codex real backend smoke passed.`
+- isolation: `worktree_created=true`, `write_workspace=false`,
+  `original_repo_clean_after=true`
+
+The original target repo stayed clean after execution:
+
+```bash
+git -C /tmp/ariadne-real-backend-target status --short
+# no output
+```
+
+### Codex CLI Through The Next.js UI
+
+The API server was started from the disposable target repository so the UI's
+default `target_repo: "."` pointed at that repo, not the Ariadne source tree:
+
+```bash
+ARIADNE_DB=/tmp/ariadne-real-frontend.db \
+  uv --project /Users/martinlos/code/ariadne-0630 run ariadne api-serve \
+  --host 127.0.0.1 --port 8000
+
+cd frontend && npm run dev -- --hostname localhost --port 3000
+```
+
+Browser automation selected `codex` in the New Task modal and submitted:
+
+```text
+Edit README.md by adding one sentence: UI Codex real backend smoke passed.
+```
+
+Observed DB result:
+
+- issue: `issue-8501fd45329a`
+- taskrun: `taskrun-0e2e8b86dc19`
+- status: `completed`
+- provider: `codex`
+- duration: `29.5414726249946` seconds
+- changed files: `["README.md"]`
+- isolation: `worktree_created=true`, `original_repo_clean_after=true`
+- screenshot: `/tmp/ariadne-real-codex-detail.png`
+
+The UI showed `[DONE]`, `TASKRUN_COMPLETED`, `+ README.md`, and the captured
+diff. The original target repo stayed clean after the UI run.
+
+Claude Code was not run in this slice. The backend binary is available
+(`claude 2.1.197`), but one real provider path was sufficient to validate the
+frontend/API/worktree/result-display loop without doubling the provider spend.
+
 ## Verification Snapshot
 
 ```bash
@@ -123,7 +215,7 @@ uv run ruff check src/ariadne/
 # All checks passed!
 
 cd frontend && npm test
-# 3 passed
+# 4 passed
 
 cd frontend && npm run build
 # Compiled successfully
@@ -139,9 +231,8 @@ recorded as a dependency follow-up rather than forced in this slice.
 
 ## Still Not Done
 
-- Real `codex`/`claude` backend validation has not been run yet. The current
-  proof is dry-run only.
-- No real backend performance numbers were produced. No numbers are estimated.
+- Claude Code end-to-end validation has not been run yet. Codex real-provider
+  validation did run and the measured durations above are real.
 - True in-flight execution streaming is still bounded by the synchronous
   `POST /api/issues`/`run_intent()` model. The current frontend shows persisted
   SSE replay/live table polling events from deep-009, not a background job queue

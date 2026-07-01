@@ -53,6 +53,26 @@ def test_run_named_agent_resolves_or_creates_without_uuid(tmp_path):
         store.close()
 
 
+def test_run_default_marks_completed_issue_done(tmp_path):
+    store = Store(str(tmp_path / "run.db"))
+    try:
+        result = run_intent(
+            store,
+            ["write hello"],
+            backend="dry-run",
+            target_repo=str(tmp_path),
+            max_iterations=10,
+        )
+
+        assert result.completed is True
+        assert result.issue_id is not None
+        issue = store.get_issue(result.issue_id)
+        assert issue is not None
+        assert issue.status == IssueStatus.DONE
+    finally:
+        store.close()
+
+
 def test_run_detach_creates_taskrun_without_starting_daemon(tmp_path):
     store = Store(str(tmp_path / "run.db"))
     try:

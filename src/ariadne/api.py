@@ -6,10 +6,10 @@ Per docs/architecture/dashboard-layout.md.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
@@ -258,7 +258,7 @@ def _sse_message(event_name: str, payload: dict) -> str:
     return f"event: {event_name}\ndata: {body}\n\n"
 
 
-def _event_stream(limit: int | None, poll_interval: float) -> Iterator[str]:
+async def _event_stream(limit: int | None, poll_interval: float) -> AsyncIterator[str]:
     yielded = 0
     last_issue_cursor: tuple[str, str] | None = None
     last_activity_cursor: tuple[str, str] | None = None
@@ -316,7 +316,7 @@ def _event_stream(limit: int | None, poll_interval: float) -> Iterator[str]:
 
         messages.sort(key=lambda item: (item[1]["created_at"], item[1]["id"]))
         if not messages:
-            time.sleep(poll_interval)
+            await asyncio.sleep(poll_interval)
             continue
         for event_name, payload in messages:
             yield _sse_message(event_name, payload)

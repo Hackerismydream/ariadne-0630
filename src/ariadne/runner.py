@@ -202,6 +202,7 @@ def _run_explicit_tasks(
         done=lambda: _all_terminal(store, [taskrun.id for taskrun in taskruns]),
         max_iterations=max_iterations,
     )
+    _mark_completed_issues_done(store, taskruns)
     return _result_for_taskruns(
         store,
         mode="default",
@@ -476,6 +477,20 @@ def _all_terminal(store: Store, taskrun_ids: list[str]) -> bool:
         if taskrun is None or taskrun.status not in TERMINAL_STATUSES:
             return False
     return True
+
+
+def _mark_completed_issues_done(store: Store, taskruns: list[TaskRun]) -> None:
+    seen_issue_ids: set[str] = set()
+    for original in taskruns:
+        taskrun = store.get_taskrun(original.id)
+        if taskrun is None or taskrun.status != TaskStatus.COMPLETED:
+            continue
+        if taskrun.issue_id in seen_issue_ids:
+            continue
+        issue = store.get_issue(taskrun.issue_id)
+        if issue is not None and issue.status != IssueStatus.DONE:
+            store.update_issue_status(issue.id, IssueStatus.DONE)
+        seen_issue_ids.add(taskrun.issue_id)
 
 
 def _issue_done(store: Store, issue_id: str) -> bool:

@@ -3,9 +3,12 @@
 Per docs/plan/tasks/deep-004.md.
 """
 
+import inspect
+
 import pytest
 from fastapi.testclient import TestClient
 
+from ariadne import api
 from ariadne.api import app
 from ariadne.models import AssigneeType, IssueStatus
 from ariadne.store import Store
@@ -188,6 +191,12 @@ def test_events_sse_streams_issue_timeline_events(client):
     assert "text/event-stream" in res.headers["content-type"]
     assert "event: issue_timeline" in body
     assert '"event_type":"issue_created"' in body
+
+
+def test_events_stream_is_async_to_avoid_threadpool_starvation():
+    stream = api._event_stream(limit=1, poll_interval=0)
+
+    assert inspect.isasyncgen(stream)
 
 
 def test_cors_allows_localhost_nextjs(tmp_path, monkeypatch):

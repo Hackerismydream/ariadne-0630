@@ -82,3 +82,21 @@ uv run ariadne run "在 README 加简介" "建 CONTRIBUTING 骨架" --backend co
 
 ## 回报要求
 列出：`run` 命令签名（默认 + `--squad` 两态）、是否复用 demo_v1 组装、默认模式 N-issue 是否绕开 per-issue 串行（应绕开）、`--squad` 是否复用现有 Orchestrator 而非新写、按名字指派是否让用户零 UUID、阻塞/`--detach` 语义、结果打印字段、两条 dry-run 冒烟输出、是否抽 runner.py。
+
+## Codex 实施结构设计（deep-008）
+
+本轮实现只落在 Python 后端，遵守 `AGENTS.md` 的 CLI/API 共用业务逻辑边界，不新增前端文件，不扩展历史遗留 `dashboard.html`。
+
+### 新增/修改文件
+
+- `src/ariadne/runner.py`：新增可复用 runner 编排层。负责 `ariadne run` 的业务流程：解析/创建 named agent、默认模式创建 N 个独立 issue + taskrun、squad 模式复用现有 `Orchestrator` + `llm_decide` 接线、启动 `Daemon`、聚合状态/耗时/result 中的 `diff` 与 `changed_files`。这个文件是 deep-009 `POST /api/issues` 复用入口，避免 CLI/API 各写一份。
+- `src/ariadne/cli.py`：只新增 `run` 命令的 Typer 参数解析和终端输出。CLI 不写 SQL、不直接拼业务流程、不绕过 runner。
+- `tests/test_runner.py`：新增 dry-run 自动化测试，覆盖默认模式 N issue/N agent、按名字解析 agent、不存在则创建、`--detach` 立即返回、`--squad` 走 orchestrator 接线。测试不需要真实 Codex/Claude 凭证。
+- `tests/test_cli.py` 或现有 CLI 测试文件：只在必要时补一层命令调用烟测，验证 Typer 参数接到 runner；业务断言放在 `test_runner.py`。
+
+### 分层理由
+
+- `runner.py` 位于后端编排层：它组合 `Store`、`Daemon`、`get_backend`、`Orchestrator`，但不改这些底层行为。它不直接承担持久化细节，持久化仍通过 Store facade/service/repo。
+- 默认模式不引入 LLM：用户已经显式拆分任务，所以 runner 只创建独立 issue/taskrun 并让 daemon 并发 claim。每个任务一个 issue，天然绕开 deep-006 的 per-issue 串行限制。
+- squad 模式不新写 leader 逻辑：runner 只复用 `Orchestrator` 和 `llm_decide`，无 API key 时沿用确定性 fallback。
+- 结果打印在 CLI 层，结果数据结构在 runner 层。这样 API 后续可以直接返回结构化 `RunResult`，CLI 再把它格式化成人类可读文本。

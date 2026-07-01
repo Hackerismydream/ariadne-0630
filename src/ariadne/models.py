@@ -134,7 +134,7 @@ class RuntimeMachine(BaseModel):
     version: str = ""
     device_info: dict = Field(default_factory=dict)
     last_heartbeat_at: datetime | None = None
-    max_concurrent_taskruns: int = 1
+    max_concurrent_taskruns: int = 4
     workspace_root: str = ""
     repo_allowlist: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
@@ -462,3 +462,6 @@ class ProgressUpdate(BaseModel):
     step: int
     total: int
     timestamp: datetime
+    message_type: str | None = None
+    tool_name: str | None = None
+    content: str | None = None

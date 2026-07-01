@@ -145,6 +145,25 @@ If worktree creation fails, execution stops. The backend never silently falls
 back to writing the target repository. `confirm_execution` remains the internal
 compatibility field, but the CLI exposes the behavior as `--write-workspace`.
 
+Every real backend result includes `metadata["worktree_audit"]`:
+
+```json
+{
+  "target_repo_path": "/path/to/repo",
+  "execution_repo_path": "/tmp/ariadne-worktrees.../<trace>",
+  "worktree_created": true,
+  "write_workspace": false,
+  "isolation_required": true,
+  "rendered_command": "...",
+  "command_cwd": "/tmp/ariadne-worktrees.../<trace>",
+  "patch_captured_before_cleanup": true,
+  "original_repo_clean_after": true
+}
+```
+
+That audit object is the durable proof that the safe path used an isolated
+workspace and captured the patch before cleanup.
+
 ## Command Template Rendering
 
 ```python
@@ -177,10 +196,16 @@ class ProgressUpdate(BaseModel):
     step: int             # current step
     total: int            # total steps (estimated)
     timestamp: datetime
+    message_type: str | None = None
+    tool_name: str | None = None
+    content: str | None = None
 ```
 
 Backends call `on_progress(ProgressUpdate(...))` during execution. The daemon
-layer persists these to IssueTimeline as `progress_reported` events.
+layer persists these to IssueTimeline as `progress_reported` events. Stdout
+lines that are JSON objects fill `message_type`, `tool_name`, and `content`
+when those keys are available; plain text lines use the stripped line as
+`summary` and `content`.
 
 ## Backend Registry
 

@@ -135,3 +135,40 @@ def test_streaming_progress():
     assert any("line 1" in s for s in summaries)
     assert any("finished" in s for s in summaries)
     assert result.success is True
+
+
+def test_streaming_progress_structured_fields():
+    progress_calls = []
+    tool_line = json.dumps({
+        "type": "tool_use",
+        "tool_name": "pytest",
+        "content": "running tests",
+    }) + "\n"
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([tool_line, "plain line\n"])
+            self.stderr = iter([])
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            pass
+
+    backend = CodexBackend()
+    context = _make_context(target_repo_path="/tmp", confirm_execution=True)
+
+    with patch.object(backend, "is_available", return_value=True), \
+         patch("subprocess.Popen", return_value=FakeProc()), \
+         patch("ariadne.backends._is_git_repo", return_value=False), \
+         patch("ariadne.backends._capture_diff", return_value=(None, [])):
+        backend.execute(context, on_progress=lambda p: progress_calls.append(p))
+
+    structured = next(p for p in progress_calls if p.message_type == "tool_use")
+    plain = next(p for p in progress_calls if p.content == "plain line")
+
+    assert structured.tool_name == "pytest"
+    assert structured.content == "running tests"
+    assert structured.summary == "running tests"
+    assert plain.message_type is None
+    assert plain.tool_name is None
+    assert plain.summary == "plain line"

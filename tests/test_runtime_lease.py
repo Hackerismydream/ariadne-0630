@@ -42,6 +42,16 @@ def seed_taskrun(store: Store):
     return store.enqueue_taskrun(issue.id, agent.id)
 
 
+def test_runtime_machine_default_capacity_is_parallel(store: Store, tmp_path):
+    machine = store.register_runtime_machine(
+        runtime_machine_id="rt-default",
+        name="Default Runtime",
+        workspace_root=str(tmp_path),
+    )
+
+    assert machine.max_concurrent_taskruns == 4
+
+
 def test_claim_taskrun_for_runtime_machine_creates_active_lease(store: Store, tmp_path):
     assert hasattr(models, "RuntimeLeaseStatus")
     RuntimeLeaseStatus = models.RuntimeLeaseStatus
@@ -136,6 +146,109 @@ def test_concurrent_claims_create_only_one_active_runtime_lease(tmp_path):
         ) == 1
     finally:
         verify.close()
+
+
+def test_runtime_machine_claim_serializes_active_taskruns_per_issue(
+    store: Store, tmp_path
+):
+    seed_runtime(store, tmp_path)
+    agent = store.create_agent("Runner", "", ["dry-run"], [])
+    issue = store.create_issue("same issue", "", AssigneeType.AGENT, agent.id)
+    first = store.enqueue_taskrun(issue.id, agent.id)
+    second = store.enqueue_taskrun(issue.id, agent.id)
+
+    first_claim = store.claim_taskrun_for_runtime_machine("rt-lease")
+    second_claim = store.claim_taskrun_for_runtime_machine("rt-lease")
+
+    assert first_claim is not None
+    assert first_claim.taskrun.id == first.id
+    assert second_claim is None
+    assert store.get_taskrun(second.id).status == TaskStatus.QUEUED
+
+    store.start_taskrun(first_claim.taskrun.id)
+    store.complete_taskrun(first_claim.taskrun.id, {"ok": True})
+    store.release_runtime_lease(first_claim.lease.id)
+    second_claim_after_terminal = store.claim_taskrun_for_runtime_machine("rt-lease")
+
+    assert second_claim_after_terminal is not None
+    assert second_claim_after_terminal.taskrun.id == second.id
+
+
+def test_runtime_machine_claim_respects_runtime_capacity(store: Store, tmp_path):
+    store.register_runtime_machine(
+        runtime_machine_id="rt-capacity",
+        name="Capacity Runtime",
+        workspace_root=str(tmp_path),
+        max_concurrent_taskruns=4,
+    )
+    store.upsert_runtime_capability(
+        runtime_machine_id="rt-capacity",
+        provider="dry-run",
+        command_path="dry-run",
+        status=RuntimeCapabilityStatus.AVAILABLE,
+    )
+    profile = store.create_agent_profile(
+        "Parallel Runner",
+        preferred_capabilities=["dry-run"],
+        max_concurrent_taskruns=4,
+    )
+    for index in range(5):
+        issue = store.create_issue(
+            f"issue {index}", "", AssigneeType.AGENT, profile.id
+        )
+        store.enqueue_taskrun(issue.id, profile.id)
+
+    claims = [
+        store.claim_taskrun_for_runtime_machine("rt-capacity")
+        for _ in range(5)
+    ]
+
+    assert len([claim for claim in claims if claim is not None]) == 4
+    assert claims[-1] is None
+
+
+def test_runtime_machine_claim_respects_agent_profile_capacity(
+    store: Store, tmp_path
+):
+    store.register_runtime_machine(
+        runtime_machine_id="rt-profile-capacity",
+        name="Profile Capacity Runtime",
+        workspace_root=str(tmp_path),
+        max_concurrent_taskruns=4,
+    )
+    store.upsert_runtime_capability(
+        runtime_machine_id="rt-profile-capacity",
+        provider="dry-run",
+        command_path="dry-run",
+        status=RuntimeCapabilityStatus.AVAILABLE,
+    )
+    profile = store.create_agent_profile(
+        "Serial Runner",
+        preferred_capabilities=["dry-run"],
+        max_concurrent_taskruns=1,
+    )
+    first_issue = store.create_issue("first", "", AssigneeType.AGENT, profile.id)
+    second_issue = store.create_issue("second", "", AssigneeType.AGENT, profile.id)
+    first = store.enqueue_taskrun(first_issue.id, profile.id)
+    second = store.enqueue_taskrun(second_issue.id, profile.id)
+
+    first_claim = store.claim_taskrun_for_runtime_machine("rt-profile-capacity")
+    second_claim = store.claim_taskrun_for_runtime_machine("rt-profile-capacity")
+
+    assert first_claim is not None
+    assert first_claim.taskrun.id == first.id
+    assert second_claim is None
+    assert store.get_taskrun(second.id).status == TaskStatus.QUEUED
+
+    store.start_taskrun(first_claim.taskrun.id)
+    store.complete_taskrun(first_claim.taskrun.id, {"ok": True})
+    store.release_runtime_lease(first_claim.lease.id)
+    second_claim_after_terminal = store.claim_taskrun_for_runtime_machine(
+        "rt-profile-capacity"
+    )
+
+    assert second_claim_after_terminal is not None
+    assert second_claim_after_terminal.taskrun.id == second.id
 
 
 def test_daemon_executes_dry_run_taskrun_through_runtime_lease(store: Store, tmp_path):

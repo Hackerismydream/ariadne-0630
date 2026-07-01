@@ -123,6 +123,12 @@ class SquadRepo:
         ).fetchone()
         return self.row_to(Squad, row) if row else None
 
+    def get_squad_by_name(self, name: str) -> Squad | None:
+        row = self._conn.execute(
+            "SELECT * FROM squad WHERE name = ? ORDER BY id LIMIT 1", (name,)
+        ).fetchone()
+        return self.row_to(Squad, row) if row else None
+
     def get_squad_members(self, squad_id: str) -> list[SquadMember]:
         rows = self._conn.execute(
             "SELECT * FROM squad_member WHERE squad_id = ?", (squad_id,)

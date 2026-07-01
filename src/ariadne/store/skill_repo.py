@@ -263,6 +263,12 @@ class SkillRepo:
         ).fetchone()
         return self.row_to(Agent, row) if row else None
 
+    def get_agent_by_name(self, name: str) -> Agent | None:
+        row = self._conn.execute(
+            "SELECT * FROM agent WHERE name = ? ORDER BY id LIMIT 1", (name,)
+        ).fetchone()
+        return self.row_to(Agent, row) if row else None
+
     def list_agents(self) -> list[Agent]:
         rows = self._conn.execute("SELECT * FROM agent ORDER BY name").fetchall()
         return [self.row_to(Agent, r) for r in rows]

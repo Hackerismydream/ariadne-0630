@@ -118,6 +118,15 @@ class TaskRepo:
         rows = self._conn.execute("SELECT * FROM task ORDER BY created_at DESC").fetchall()
         return [self.row_to(TaskRun, r) for r in rows]
 
+    def list_taskruns_for_issue(self, issue_id: str) -> list[TaskRun]:
+        rows = self._conn.execute(
+            """SELECT * FROM task
+               WHERE issue_id = ?
+               ORDER BY created_at, id""",
+            (issue_id,),
+        ).fetchall()
+        return [self.row_to(TaskRun, r) for r in rows]
+
     def get_pending_member_tasks(self, squad_id: str) -> list[Task]:
         """Return non-terminal tasks belonging to squad members (not the leader)."""
         rows = self._conn.execute(

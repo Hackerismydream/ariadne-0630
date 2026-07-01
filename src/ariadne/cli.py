@@ -15,6 +15,7 @@ import typer
 from ariadne.backends import get_backend
 from ariadne.daemon import Daemon
 from ariadne.models import AssigneeType
+from ariadne.runner import RunResult, run_intent
 from ariadne.store import Store
 
 app = typer.Typer(help="Ariadne: local multi-agent orchestration platform.")
@@ -25,6 +26,39 @@ _db_path = os.environ.get("ARIADNE_DB", "ariadne.db")
 
 def _get_store() -> Store:
     return Store(os.environ.get("ARIADNE_DB", _db_path))
+
+
+def _print_run_result(result: RunResult) -> None:
+    state = "detached" if result.detached else "complete"
+    typer.echo(f"Ariadne run {state} mode={result.mode} runtime={result.runtime_id}")
+    if result.issue_id:
+        typer.echo(f"Issue: {result.issue_id}")
+    if result.squad_id:
+        typer.echo(f"Squad: {result.squad_id}")
+    typer.echo(f"Target repo: {result.target_repo}")
+    if result.iterations:
+        typer.echo(f"Daemon iterations: {result.iterations}")
+    for task in result.task_results:
+        duration = (
+            f"{task.duration_seconds:.4f}s"
+            if task.duration_seconds is not None
+            else "n/a"
+        )
+        diff_state = "yes" if task.diff else "none"
+        changed_files = ", ".join(task.changed_files) if task.changed_files else "-"
+        typer.echo(
+            f"  {task.taskrun_id} [{task.status}] issue={task.issue_id} "
+            f"agent={task.agent_name} duration={duration} "
+            f"diff={diff_state} changed_files={changed_files}"
+        )
+        if task.error:
+            typer.echo(f"    error={task.error}")
+    if result.detached:
+        typer.echo("Inspect progress with:")
+        for task in result.task_results:
+            typer.echo(f"  uv run ariadne taskrun-timeline {task.taskrun_id}")
+    elif not result.completed:
+        typer.echo("Run stopped before all requested work reached a terminal state.")
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +333,77 @@ def taskrun_timeline(
             f"taskrun={e['task_id']}{details_str}"
         )
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# Intent-level run command
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="run")
+def run_command(
+    tasks: list[str] = typer.Argument(
+        ...,
+        help="One or more task descriptions. Default mode treats each as an independent issue.",
+    ),
+    backend: str = typer.Option("dry-run", "--backend", "-b"),
+    squad: bool = typer.Option(
+        False,
+        "--squad",
+        help="Treat the task text as one squad-led issue.",
+    ),
+    squad_name: str = typer.Option(
+        "Ariadne Run Squad",
+        "--squad-name",
+        help="Squad name to resolve or create in --squad mode.",
+    ),
+    agent: str | None = typer.Option(
+        None,
+        "--agent",
+        help="Agent name to resolve or create. Defaults to temporary Run Agent N profiles.",
+    ),
+    target_repo: str = typer.Option(".", "--target-repo"),
+    max_concurrent: int | None = typer.Option(None, "--max-concurrent"),
+    write_workspace: bool = typer.Option(
+        False,
+        "--write-workspace",
+        help="Allow the backend to write directly to the target repo.",
+    ),
+    detach: bool = typer.Option(
+        False,
+        "--detach",
+        help="Create issues/taskruns and return immediately.",
+    ),
+    max_iterations: int | None = typer.Option(
+        None,
+        "--max-iterations",
+        help="Safety cap for blocking daemon iterations.",
+    ),
+):
+    """Run task descriptions through Ariadne without exposing UUID plumbing."""
+    store = _get_store()
+    try:
+        result = run_intent(
+            store,
+            tasks,
+            backend=backend,
+            squad=squad,
+            squad_name=squad_name,
+            agent_name=agent,
+            target_repo=target_repo,
+            max_concurrent=max_concurrent,
+            write_workspace=write_workspace,
+            detach=detach,
+            max_iterations=max_iterations,
+        )
+        _print_run_result(result)
+        if not result.detached and not result.completed:
+            raise typer.Exit(1)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        store.close()
 
 
 # ---------------------------------------------------------------------------

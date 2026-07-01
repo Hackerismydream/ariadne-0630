@@ -2,24 +2,25 @@
 
 ## Purpose
 
-Local multi-agent orchestration platform. Manages the full lifecycle of
-coding-agent tasks: from issue assignment, through Squad leader delegation,
-to harness execution (Codex/Claude Code), with retry, failure classification,
-and progress tracking.
+Local managed-agent team runtime. It manages the lifecycle of coding-agent
+work from Issue and TaskRun facts, through Squad leader delegation, to isolated
+Codex/Claude Code execution, verification evidence, retry, failure
+classification, and trace replay.
 
 ## Boundary
 
 ```
 In scope                                  Out of scope
 ─────────                                 ───────────
-issue/task/squad CRUD                     knowledge compilation / RAG
-task state machine (queued→completed)     frontend / web UI
-squad leader briefing + delegation        multi-workspace / auth
-daemon poll-claim-execute loop            Postgres / hosted DB
-Codex/Claude backend integration          autopilot / chat / scheduled tasks
-retry + failure classification            Feishu / GitHub / Inbox
-structured logging + trace ID             vector DB / embedding search
-LLM-as-judge evaluation                   memory / backlog planning
+issue/taskrun/squad/profile/skill CRUD    knowledge compilation / RAG
+queued→claimed→running→terminal machine   hosted multi-tenant service
+RuntimeMachine/Capability/Lease facts     auth / billing / tenants
+squad leader briefing + delegation        Postgres / network scheduler
+daemon poll-claim-execute loop            autopilot / scheduled inbox work
+Codex/Claude/dry-run backend adapters     Feishu / GitHub product sync
+worktree-isolated real execution          vector DB / embedding search
+BenchmarkRun from product facts           public plugin marketplace
+FastAPI dashboard for inspection          production frontend app
 ```
 
 ## Layer Architecture
@@ -27,86 +28,116 @@ LLM-as-judge evaluation                   memory / backlog planning
 ```
 ┌──────────────────────────────────────────────────────────┐
 │  CLI / API Layer                                          │
-│  cli.py (typer)          api.py (FastAPI, optional)       │
-│  Issue CRUD, daemon control, board export                 │
+│  cli.py (Typer)          api.py (FastAPI dashboard API)   │
+│  Issue/TaskRun/runtime/profile/skill/squad/benchmark I/O  │
 │  Zero business logic — only serialization and routing     │
 ├──────────────────────────────────────────────────────────┤
 │  Orchestration Layer                                      │
 │  orchestrator.py    Squad leader delegation + event loop  │
 │  briefing.py        Generate leader briefing (protocol +  │
 │                     roster + instructions)                │
-│  No direct DB writes — calls store layer                  │
+│  llm_decide.py      Structured DelegationDecision parsing │
 ├──────────────────────────────────────────────────────────┤
-│  Service Layer                                            │
-│  store.py           SQLite persistence + state transitions│
-│  models.py          Pydantic models (Task, Squad, Agent…) │
-│  daemon.py          Poll loop, heartbeat, claim, cancel   │
+│  Runtime Control Plane                                    │
+│  store.py           SQLite/WAL product facts + state      │
+│                     transitions                           │
+│  daemon.py          Runtime registration, leases, claim,  │
+│                     heartbeat, retry, verification        │
+│  policy.py          Runtime/lease/profile/skill gates     │
 ├──────────────────────────────────────────────────────────┤
 │  Execution Layer                                          │
 │  backends.py        ExecutionBackend protocol             │
-│                     CodexBackend, ClaudeBackend           │
-│                     Command template, safety gate, diff   │
+│                     Backend registry + Codex/Claude/DryRun│
+│                     Resume/MCP, worktree isolation, diff  │
 ├──────────────────────────────────────────────────────────┤
 │  Storage                                                   │
-│  SQLite (ariadne.db)                                   │
-│  Tables: issue, task, squad, squad_member, agent,         │
-│          activity_log, run_message                        │
+│  SQLite (ariadne.db, WAL for file-backed stores)          │
+│  Tables: issue, task/taskrun, runtime_machine, capability,│
+│          lease, agent_profile, skill, leader_decision,    │
+│          issue_timeline_event, benchmark_run, activity_log│
 └──────────────────────────────────────────────────────────┘
 ```
 
-## Layer Rules (hard, enforced by tests)
+## Current Execution Flow
+
+```
+Issue
+  │
+  ├─ assigned to AgentProfile ───────────────┐
+  │                                          │
+  └─ assigned to Squad ──► Leader TaskRun ──►│
+                         │                  │
+                         └─ LeaderDecision ─┘
+                                      │
+                                      ▼
+Queued TaskRun
+  │
+  ├─ RuntimeMachine atomically claims and creates RuntimeLease
+  │
+  ├─ ExecutionPolicy validates lease, runtime, capability, profile, skills
+  │
+  ├─ Daemon builds ExecutionContext
+  │     ├─ bound Skills materialized into the handoff
+  │     ├─ resume_session_id from parent/same trace result
+  │     └─ mcp_config_path from AgentProfile policy, then environment fallback
+  │
+  ├─ Backend registry selects DryRun, Codex, Claude Code, or in-process extension
+  │
+  ├─ Real backend executes
+  │     ├─ default: detached git worktree
+  │     ├─ explicit escape hatch: --write-workspace
+  │     ├─ stdout progress streamed to IssueTimeline
+  │     ├─ diff and changed_files captured before cleanup
+  │     └─ worktree_audit recorded in result metadata
+  │
+  ├─ Skill verification commands run as evidence, not hard gates
+  │
+  └─ TaskRun becomes completed/failed/cancelled, then leader may re-evaluate
+```
+
+## Layer Rules
 
 | Rule | Enforcement |
 |------|-------------|
-| CLI/API layer has zero business logic | No `import` of orchestrator/store internals beyond public methods |
-| Orchestration layer never writes DB directly | All writes go through `store.py` public methods |
+| CLI/API layer has no control-plane state machine logic | Commands call public store/daemon/orchestrator APIs |
+| Orchestration decisions are structured | Leader outputs `LeaderDecision` / `DelegationDecision`, persisted as facts |
 | Execution layer never knows about squads | Backend receives `ExecutionContext`, returns `ExecutionResult` |
 | models.py has zero dependencies on other layers | Pure Pydantic, no imports from store/orchestrator/backends |
-| Each layer testable in isolation | Mock only the layer below, never the layer above |
+| Real execution is isolation-first | Backend worktree tests cover default isolation and write-workspace escape |
+| Benchmark metrics come from product facts | BenchmarkRun runners export SQLite-derived facts and summaries |
 
 ## Module Index
 
-| Module | Doc | Lines (target) |
-|--------|-----|----------------|
-| models.py | [task-state-machine.md](task-state-machine.md) | ~250 |
-| store.py | [task-state-machine.md](task-state-machine.md) | ~300 |
-| daemon.py | [task-state-machine.md](task-state-machine.md) | ~350 |
-| briefing.py | [squad-orchestration.md](squad-orchestration.md) | ~150 |
-| orchestrator.py | [squad-orchestration.md](squad-orchestration.md) | ~400 |
-| backends.py | [harness-backend.md](harness-backend.md) | ~400 |
-| api.py | (inline in README) | ~250 |
-| cli.py | (inline in README) | ~200 |
+| Module | Responsibility | Related doc |
+|--------|----------------|-------------|
+| `models.py` | Pydantic domain objects and enums | [task-state-machine.md](task-state-machine.md) |
+| `store.py` | SQLite schema, WAL setup, state transitions, product facts | [task-state-machine.md](task-state-machine.md) |
+| `daemon.py` | Runtime registration, heartbeat, claim, execution, retry | [task-state-machine.md](task-state-machine.md) |
+| `policy.py` | Layered real-execution policy gate | [harness-backend.md](harness-backend.md) |
+| `briefing.py` | Squad briefing from roster and issue facts | [squad-orchestration.md](squad-orchestration.md) |
+| `orchestrator.py` | Leader action/no_action/failed/done loop | [squad-orchestration.md](squad-orchestration.md) |
+| `llm_decide.py` | JSON parsing and fallback for leader decisions | [squad-orchestration.md](squad-orchestration.md) |
+| `backends.py` | Backend registry, command rendering, worktree execution | [harness-backend.md](harness-backend.md) |
+| `eval.py` | BenchmarkRun from product facts and comparison helper | [trace-observability.md](trace-observability.md) |
+| `benchmarking.py` | Artifact-backed benchmark runners and aggregate report | [trace-observability.md](trace-observability.md) |
+| `api.py` | FastAPI inspection/dashboard endpoints | [dashboard-layout.md](dashboard-layout.md) |
+| `cli.py` | Typer command surface | README |
 
 ## Design Decisions
 
-### D1: SQLite over JSON/JSONL
+Architecture decisions are recorded under `docs/adr/`.
 
-Ariadne used JSON/JSONL files. Multica uses Postgres. We use SQLite —
-durable state transitions need transactional integrity (claim must be atomic),
-but we don't need a server. SQLite gives us `BEGIN IMMEDIATE` for atomic claims.
+| ADR | Decision |
+|-----|----------|
+| [0010](../adr/0010-open-execution-backend-registry.md) | Open in-process backend registry, no third-party entry points yet |
+| [0011](../adr/0011-provider-session-resume-and-mcp-config.md) | Provider session resume and MCP config precedence |
+| [0012](../adr/0012-skills-as-capability-packages.md) | Skills as materialized capability packages |
+| [0013](../adr/0013-isolation-first-real-backend-execution.md) | Isolation-first real backend execution |
 
-### D2: LangGraph for orchestrator internal flow, not for the control plane
+## Provenance
 
-The task queue and daemon are plain Python + SQLite. LangGraph is used only
-inside `orchestrator.py` to model the leader's delegation decision as a
-supervisor graph (leader node → handoff → member node). The control plane
-(state machine, claim loop) is framework-agnostic.
-
-### D3: Structured delegation, not @mention
-
-Multica's leader delegates by posting `[@Name](mention://agent/<UUID>)` markdown.
-We use a `DelegationDecision` Pydantic model — serializable, testable,
-replayable. This is a deliberate deviation, documented in multica-mapping.md.
-
-### D4: No daemon-as-process-manager
-
-`daemon start` runs a polling loop in the foreground (or `--background` via
-simple fork). No systemd, no supervisor, no process manager. Ctrl-C stops
-cleanly, in-flight tasks are marked `failed` with `failure_reason=runtime_recovery`.
-
-## Relationship to multica
-
-See [multica-mapping.md](multica-mapping.md) for the mechanism-by-mechanism
-mapping. Summary: we extract task state machine (migration 001/055), squad
-briefing (squad_briefing.go), and daemon claim loop (daemon.go), re-implemented
-in Python with SQLite + LangGraph.
+The runtime borrows three proven mechanisms from multica: task lifecycle,
+squad briefing, and daemon-style claim/execution. Ariadne re-implements those
+mechanisms as a local Python/SQLite control plane rather than a hosted
+Go/Postgres service. See [multica-mapping.md](multica-mapping.md) for the
+mechanism-by-mechanism mapping.

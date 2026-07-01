@@ -5,6 +5,7 @@ Per docs/plan/tasks/core-003.md "test_daemon.py must cover".
 
 import shlex
 import sys
+import re
 
 import pytest
 from typer.testing import CliRunner
@@ -425,10 +426,11 @@ def test_cli_issue_create(cli_runner, tmp_path, monkeypatch):
 
 def test_cli_daemon_start_exposes_write_workspace_instead_of_confirm(cli_runner):
     result = cli_runner.invoke(app, ["daemon-start", "--help"])
+    plain_output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
 
     assert result.exit_code == 0
-    assert "--write-workspace" in result.stdout
-    assert "--confirm-execution" not in result.stdout
+    assert re.search(r"--write-\s*workspace", plain_output)
+    assert "--confirm-execution" not in plain_output
 
 
 def test_cli_daemon_start_max_iterations(cli_runner, tmp_path, monkeypatch):

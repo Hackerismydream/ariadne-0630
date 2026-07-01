@@ -1,4 +1,4 @@
-"""Tests for backends.py — safety gate, command rendering, diff capture, registry.
+"""Tests for backends.py — isolation gate, command rendering, diff capture, registry.
 
 Per docs/plan/tasks/backend-001.md "test_backends.py must cover".
 """

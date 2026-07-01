@@ -187,3 +187,35 @@ class SquadRepo:
             }
             for r in rows
         ]
+
+    def list_activity_events_after(
+        self,
+        *,
+        created_at: str | None = None,
+        event_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        if created_at is None or event_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM activity_log ORDER BY created_at, id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT * FROM activity_log
+                   WHERE created_at > ?
+                      OR (created_at = ? AND id > ?)
+                   ORDER BY created_at, id LIMIT ?""",
+                (created_at, created_at, event_id, limit),
+            ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "trace_id": r["trace_id"],
+                "task_id": r["task_id"],
+                "event": r["event"],
+                "details": json.loads(r["details"]) if r["details"] else None,
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]

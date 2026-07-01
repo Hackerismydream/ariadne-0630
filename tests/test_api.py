@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ariadne.api import app
-from ariadne.models import AssigneeType
+from ariadne.models import AssigneeType, IssueStatus
 from ariadne.store import Store
 
 
@@ -106,3 +106,101 @@ def test_api_uses_ariadne_db_environment(tmp_path, monkeypatch):
 
     assert res.status_code == 200
     assert res.json()[0]["title"] == "Env Issue"
+
+
+def test_create_issue_runs_intent_and_returns_run_result(tmp_path, monkeypatch):
+    db = str(tmp_path / "run-api.db")
+    monkeypatch.setattr("ariadne.api._db_path", db)
+
+    res = TestClient(app).post(
+        "/api/issues",
+        json={
+            "title": "Write hello",
+            "description": "Create a hello helper",
+            "backend": "dry-run",
+            "mode": "direct",
+        },
+    )
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["mode"] == "default"
+    assert data["completed"] is True
+    assert len(data["task_results"]) == 1
+    assert data["issue_id"] == data["task_results"][0]["issue_id"]
+    assert data["task_results"][0]["status"] == "completed"
+    assert "diff" in data["task_results"][0]
+    assert "changed_files" in data["task_results"][0]
+
+
+def test_issue_detail_aggregates_issue_taskruns_and_diff(client):
+    issue_id = client.get("/api/issues").json()[0]["id"]
+
+    res = client.get(f"/api/issues/{issue_id}")
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["id"] == issue_id
+    assert data["taskruns"]
+    assert data["taskruns"][0]["issue_id"] == issue_id
+    assert data["diff"] is None
+    assert data["changed_files"] == []
+
+
+def test_patch_issue_status_and_assignee(client, store):
+    assignee = store.create_agent("PatchAgent", "", ["dry-run"], [])
+
+    issue_id = client.get("/api/issues").json()[0]["id"]
+    res = client.patch(
+        f"/api/issues/{issue_id}",
+        json={
+            "status": "todo",
+            "assignee_type": "agent",
+            "assignee_id": assignee.id,
+        },
+    )
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == IssueStatus.TODO.value
+    assert data["assignee_type"] == "agent"
+    assert data["assignee_id"] == assignee.id
+
+
+def test_issue_taskruns_endpoint_returns_execution_records(client):
+    issue_id = client.get("/api/issues").json()[0]["id"]
+
+    res = client.get(f"/api/issues/{issue_id}/taskruns")
+
+    assert res.status_code == 200
+    data = res.json()
+    assert len(data) == 1
+    assert data[0]["issue_id"] == issue_id
+    assert data[0]["status"] == "completed"
+    assert "duration_seconds" in data[0]
+
+
+def test_events_sse_streams_issue_timeline_events(client):
+    with client.stream("GET", "/api/events?limit=1&poll_interval=0") as res:
+        body = next(res.iter_text())
+
+    assert res.status_code == 200
+    assert "text/event-stream" in res.headers["content-type"]
+    assert "event: issue_timeline" in body
+    assert '"event_type":"issue_created"' in body
+
+
+def test_cors_allows_localhost_nextjs(tmp_path, monkeypatch):
+    db = str(tmp_path / "cors.db")
+    monkeypatch.setattr("ariadne.api._db_path", db)
+
+    res = TestClient(app).options(
+        "/api/issues",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert res.status_code == 200
+    assert res.headers["access-control-allow-origin"] == "http://localhost:3000"

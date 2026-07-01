@@ -70,6 +70,7 @@ def run_intent(
     store: Store,
     tasks: list[str],
     *,
+    task_titles: list[str] | None = None,
     backend: str = "dry-run",
     squad: bool = False,
     squad_name: str = "Ariadne Run Squad",
@@ -88,6 +89,7 @@ def run_intent(
     clean_tasks = [task.strip() for task in tasks if task.strip()]
     if not clean_tasks:
         raise ValueError("at least one task description is required")
+    clean_titles = _clean_task_titles(task_titles, len(clean_tasks))
     target_repo_path = str(Path(target_repo).expanduser().resolve())
     concurrency = max_concurrent or _default_max_concurrent(len(clean_tasks))
 
@@ -95,6 +97,7 @@ def run_intent(
         return _run_squad_intent(
             store,
             clean_tasks,
+            issue_title=clean_titles[0] if clean_titles else None,
             backend=backend,
             squad_name=squad_name,
             agent_name=agent_name,
@@ -112,6 +115,7 @@ def run_intent(
     return _run_explicit_tasks(
         store,
         clean_tasks,
+        task_titles=clean_titles,
         backend=backend,
         agent_name=agent_name,
         target_repo=target_repo_path,
@@ -129,6 +133,7 @@ def _run_explicit_tasks(
     store: Store,
     tasks: list[str],
     *,
+    task_titles: list[str] | None,
     backend: str,
     agent_name: str | None,
     target_repo: str,
@@ -142,6 +147,7 @@ def _run_explicit_tasks(
 ) -> RunResult:
     taskruns: list[TaskRun] = []
     for index, task_text in enumerate(tasks, start=1):
+        issue_title = task_titles[index - 1] if task_titles else task_text
         if agent_name:
             agent = _resolve_or_create_agent(
                 store,
@@ -157,7 +163,7 @@ def _run_explicit_tasks(
                 max_concurrent=1,
             )
         issue = store.create_issue(
-            task_text,
+            issue_title,
             task_text,
             AssigneeType.AGENT,
             agent.id,
@@ -179,6 +185,7 @@ def _run_explicit_tasks(
             runtime_id=runtime_id,
             target_repo=target_repo,
             taskruns=taskruns,
+            issue_id=_single_issue_id(taskruns),
         )
 
     daemon = _build_daemon(
@@ -203,6 +210,7 @@ def _run_explicit_tasks(
         runtime_id=runtime_id,
         target_repo=target_repo,
         taskruns=taskruns,
+        issue_id=_single_issue_id(taskruns),
         iterations=iterations,
     )
 
@@ -211,6 +219,7 @@ def _run_squad_intent(
     store: Store,
     tasks: list[str],
     *,
+    issue_title: str | None,
     backend: str,
     squad_name: str,
     agent_name: str | None,
@@ -233,7 +242,7 @@ def _run_squad_intent(
         max_concurrent=max_concurrent,
     )
     issue = store.create_issue(
-        _title_for(task_text),
+        issue_title or _title_for(task_text),
         task_text,
         AssigneeType.SQUAD,
         squad_model.id,
@@ -486,6 +495,19 @@ def _duration_seconds(taskrun: TaskRun) -> float | None:
 
 def _default_max_concurrent(task_count: int) -> int:
     return max(1, min(os.cpu_count() or 1, task_count))
+
+
+def _clean_task_titles(task_titles: list[str] | None, task_count: int) -> list[str] | None:
+    if task_titles is None:
+        return None
+    clean_titles = [title.strip() for title in task_titles]
+    if len(clean_titles) != task_count:
+        raise ValueError("task_titles length must match tasks length")
+    return clean_titles
+
+
+def _single_issue_id(taskruns: list[TaskRun]) -> str | None:
+    return taskruns[0].issue_id if len(taskruns) == 1 else None
 
 
 def _title_for(task_text: str) -> str:

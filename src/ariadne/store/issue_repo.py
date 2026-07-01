@@ -134,3 +134,83 @@ class IssueRepo:
                 payload={"status": status.value},
             )
         return issue
+
+    def update_issue(
+        self,
+        issue_id: str,
+        *,
+        status: IssueStatus | None = None,
+        assignee_type: AssigneeType | None = None,
+        assignee_id: str | None = None,
+    ) -> Issue:
+        existing = self.get_issue(issue_id)
+        if existing is None:
+            raise KeyError(f"issue not found: {issue_id}")
+        next_status = status or existing.status
+        next_assignee_type = assignee_type or existing.assignee_type
+        next_assignee_id = assignee_id if assignee_id is not None else existing.assignee_id
+        self._conn.execute(
+            """UPDATE issue
+               SET status = ?, assignee_type = ?, assignee_id = ?
+               WHERE id = ?""",
+            (
+                next_status.value,
+                next_assignee_type.value,
+                next_assignee_id,
+                issue_id,
+            ),
+        )
+        self._conn.commit()
+        if status is not None and status != existing.status:
+            self.append_issue_timeline_event(
+                issue_id,
+                "issue_status_changed",
+                payload={"status": next_status.value},
+            )
+            if next_status in (IssueStatus.DONE, IssueStatus.CANCELLED):
+                self.append_issue_timeline_event(
+                    issue_id,
+                    "issue_closed",
+                    payload={"status": next_status.value},
+                )
+        if (
+            assignee_type is not None
+            and assignee_type != existing.assignee_type
+            or assignee_id is not None
+            and assignee_id != existing.assignee_id
+        ):
+            self.append_issue_timeline_event(
+                issue_id,
+                "issue_assignee_changed",
+                payload={
+                    "assignee_type": next_assignee_type.value,
+                    "assignee_id": next_assignee_id,
+                },
+            )
+        updated = self.get_issue(issue_id)
+        if updated is None:
+            raise KeyError(f"issue not found: {issue_id}")
+        return updated
+
+    def list_issue_timeline_events_after(
+        self,
+        *,
+        created_at: str | None = None,
+        event_id: str | None = None,
+        limit: int = 100,
+    ) -> list[IssueTimelineEvent]:
+        if created_at is None or event_id is None:
+            rows = self._conn.execute(
+                """SELECT * FROM issue_timeline_event
+                   ORDER BY created_at, id LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT * FROM issue_timeline_event
+                   WHERE created_at > ?
+                      OR (created_at = ? AND id > ?)
+                   ORDER BY created_at, id LIMIT ?""",
+                (created_at, created_at, event_id, limit),
+            ).fetchall()
+        return [self.row_to(IssueTimelineEvent, r) for r in rows]

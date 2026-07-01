@@ -116,8 +116,14 @@ class StoreBase:
     def __init__(self, db_path: str = "ariadne.db"):
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout=5000")
         if db_path != ":memory:":
-            self._conn.execute("PRAGMA journal_mode=WAL")
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
+                logger.debug("Skipped WAL setup because database is locked")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self._lock = threading.Lock()

@@ -96,7 +96,7 @@ class Daemon:
             name=f"{socket.gethostname()}:{self.runtime_id}",
             version="0.1.0",
             workspace_root=self.target_repo_path,
-            max_concurrent_taskruns=1,
+            max_concurrent_taskruns=min(os.cpu_count() or 4, 4),
             repo_allowlist=[self.target_repo_path],
             device_info={
                 "hostname": socket.gethostname(),

@@ -43,6 +43,9 @@ from ariadne.models import (
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_RUNTIME_MAX_CONCURRENT_TASKRUNS = 4
+DEFAULT_AGENT_PROFILE_MAX_CONCURRENT_TASKRUNS = 1
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -107,7 +110,7 @@ CREATE TABLE IF NOT EXISTS runtime_machine (
     version TEXT NOT NULL DEFAULT '',
     device_info TEXT NOT NULL DEFAULT '{}',
     last_heartbeat_at TEXT,
-    max_concurrent_taskruns INTEGER NOT NULL DEFAULT 1,
+    max_concurrent_taskruns INTEGER NOT NULL DEFAULT 4,
     workspace_root TEXT NOT NULL DEFAULT '',
     repo_allowlist TEXT NOT NULL DEFAULT '[]',
     metadata TEXT NOT NULL DEFAULT '{}',
@@ -718,6 +721,21 @@ class Store:
         if (current, target) not in _LEGAL_TRANSITIONS:
             raise InvalidStateTransition(current.value, action)
 
+    def _agent_capacity_available(self, agent_id: str) -> bool:
+        profile = self._conn.execute(
+            "SELECT max_concurrent_taskruns FROM agent_profile WHERE id = ?",
+            (agent_id,),
+        ).fetchone()
+        if profile is None:
+            return True
+        active_for_profile = self._conn.execute(
+            f"""SELECT COUNT(*) FROM task
+                WHERE agent_id = ?
+                  AND status IN ({_ACTIVE_TASK_STATUS_SQL})""",
+            (agent_id,),
+        ).fetchone()[0]
+        return active_for_profile < profile["max_concurrent_taskruns"]
+
     # ------------------------------------------------------------------
     # RuntimeMachine / RuntimeCapability
     # ------------------------------------------------------------------
@@ -728,7 +746,7 @@ class Store:
         name: str,
         version: str = "",
         workspace_root: str = "",
-        max_concurrent_taskruns: int = 1,
+        max_concurrent_taskruns: int = DEFAULT_RUNTIME_MAX_CONCURRENT_TASKRUNS,
         repo_allowlist: list[str] | None = None,
         device_info: dict | None = None,
         metadata: dict | None = None,
@@ -906,6 +924,21 @@ class Store:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                runtime_machine = self._conn.execute(
+                    "SELECT * FROM runtime_machine WHERE id = ?",
+                    (runtime_machine_id,),
+                ).fetchone()
+                if runtime_machine is None:
+                    self._conn.execute("COMMIT")
+                    return None
+                active_for_runtime = self._conn.execute(
+                    """SELECT COUNT(*) FROM runtime_lease
+                       WHERE runtime_machine_id = ? AND status = 'active'""",
+                    (runtime_machine_id,),
+                ).fetchone()[0]
+                if active_for_runtime >= runtime_machine["max_concurrent_taskruns"]:
+                    self._conn.execute("COMMIT")
+                    return None
                 queued_tasks = self._conn.execute(
                     f"""SELECT * FROM task
                        WHERE status = 'queued'
@@ -951,6 +984,12 @@ class Store:
                     if capability is None and capabilities:
                         capability = capabilities[0]
                         task = candidate
+                    if task is not None and not self._agent_capacity_available(
+                        task["agent_id"]
+                    ):
+                        task = None
+                        capability = None
+                        continue
                     if task is not None:
                         break
                 if task is None or capability is None:
@@ -1824,7 +1863,7 @@ class Store:
         instructions: str = "",
         preferred_capabilities: list[str] | None = None,
         runtime_policy: dict | None = None,
-        max_concurrent_taskruns: int = 1,
+        max_concurrent_taskruns: int = DEFAULT_AGENT_PROFILE_MAX_CONCURRENT_TASKRUNS,
         status: AgentProfileStatus = AgentProfileStatus.ACTIVE,
     ) -> AgentProfile:
         now = _now_iso()

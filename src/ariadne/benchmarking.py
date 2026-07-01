@@ -228,8 +228,17 @@ def finish_case(artifact_dir: Path, title: str, metrics: dict[str, Any], store: 
     return metrics
 
 
-def setup_runtime(store: Store, runtime_id: str = "runtime-bench") -> None:
-    store.register_runtime_machine(runtime_id, "Benchmark Runtime")
+def setup_runtime(
+    store: Store,
+    runtime_id: str = "runtime-bench",
+    max_concurrent_taskruns: int | None = None,
+) -> None:
+    kwargs = (
+        {"max_concurrent_taskruns": max_concurrent_taskruns}
+        if max_concurrent_taskruns is not None
+        else {}
+    )
+    store.register_runtime_machine(runtime_id, "Benchmark Runtime", **kwargs)
     store.upsert_runtime_capability(
         runtime_id,
         provider="dry-run",
@@ -315,8 +324,12 @@ def run_control_plane_concurrency(artifact_dir: Path, tasks: int = 500, workers:
     db_path = artifact_dir / "ariadne.db"
     store = Store(str(db_path))
     try:
-        setup_runtime(store)
-        profile = store.create_agent_profile("Claim Worker", preferred_capabilities=["dry-run"])
+        setup_runtime(store, max_concurrent_taskruns=tasks)
+        profile = store.create_agent_profile(
+            "Claim Worker",
+            preferred_capabilities=["dry-run"],
+            max_concurrent_taskruns=tasks,
+        )
         for index in range(tasks):
             issue = store.create_issue(f"claim {index}", "", AssigneeType.AGENT, profile.id)
             store.enqueue_taskrun(issue.id, profile.id)

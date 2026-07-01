@@ -9,6 +9,7 @@ Schema and state machine follow docs/architecture/task-state-machine.md.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -39,6 +40,8 @@ from ariadne.models import (
     TaskRunClaim,
     TaskStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -85,6 +88,9 @@ def _now_iso() -> str:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+
+_ACTIVE_TASK_STATUS_SQL = "'claimed', 'preparing', 'running'"
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +333,7 @@ class Store:
         if "trace_id" not in cols:
             self._conn.execute("ALTER TABLE task ADD COLUMN trace_id TEXT")
             self._conn.commit()
+        self._ensure_task_one_active_per_issue_index()
 
     def close(self) -> None:
         self._conn.close()
@@ -376,6 +383,7 @@ class Store:
             select_exprs.append(column if column in cols else f"NULL AS {column}")
         self._conn.execute("PRAGMA foreign_keys=OFF")
         self._conn.execute("DROP INDEX IF EXISTS idx_task_claim")
+        self._conn.execute("DROP INDEX IF EXISTS idx_task_one_active_per_issue")
         self._conn.execute(
             """CREATE TABLE task_new (
                 id TEXT PRIMARY KEY,
@@ -419,6 +427,67 @@ class Store:
                ON task(status, created_at) WHERE status = 'queued'"""
         )
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.commit()
+
+    def _ensure_task_one_active_per_issue_index(self) -> None:
+        """Enforce one active task per issue without breaking legacy databases."""
+        duplicates = self._conn.execute(
+            f"""SELECT issue_id, COUNT(*) AS active_count
+                FROM task
+                WHERE status IN ({_ACTIVE_TASK_STATUS_SQL})
+                GROUP BY issue_id
+                HAVING active_count > 1"""
+        ).fetchall()
+        for duplicate in duplicates:
+            rows = self._conn.execute(
+                f"""SELECT id FROM task
+                    WHERE issue_id = ?
+                      AND status IN ({_ACTIVE_TASK_STATUS_SQL})
+                    ORDER BY COALESCE(started_at, dispatched_at, created_at), id""",
+                (duplicate["issue_id"],),
+            ).fetchall()
+            keep_id = rows[0]["id"]
+            failed_ids = [row["id"] for row in rows[1:]]
+            logger.warning(
+                "resolving duplicate active tasks for one issue: "
+                "issue_id=%s keeping=%s failing=%s",
+                duplicate["issue_id"],
+                keep_id,
+                failed_ids,
+            )
+            now = _now_iso()
+            placeholders = ", ".join("?" for _ in failed_ids)
+            self._conn.execute(
+                f"""UPDATE task
+                    SET status = 'failed',
+                        failure_reason = 'runtime_recovery',
+                        error = ?,
+                        completed_at = ?
+                    WHERE id IN ({placeholders})""",
+                (
+                    "migration deactivated duplicate active task for "
+                    "per-issue serialization",
+                    now,
+                    *failed_ids,
+                ),
+            )
+            self._conn.execute(
+                f"""UPDATE runtime_lease
+                    SET status = 'revoked',
+                        released_at = ?,
+                        revoke_reason = 'per_issue_serialization_migration'
+                    WHERE status = 'active'
+                      AND taskrun_id IN ({placeholders})""",
+                (now, *failed_ids),
+            )
+        if duplicates:
+            self._conn.commit()
+
+        self._conn.execute(
+            f"""CREATE UNIQUE INDEX IF NOT EXISTS idx_task_one_active_per_issue
+                ON task(issue_id)
+                WHERE status IN ({_ACTIVE_TASK_STATUS_SQL})"""
+        )
         self._conn.commit()
 
     @staticmethod
@@ -838,8 +907,13 @@ class Store:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 queued_tasks = self._conn.execute(
-                    """SELECT * FROM task
+                    f"""SELECT * FROM task
                        WHERE status = 'queued'
+                         AND NOT EXISTS (
+                            SELECT 1 FROM task AS active
+                            WHERE active.issue_id = task.issue_id
+                              AND active.status IN ({_ACTIVE_TASK_STATUS_SQL})
+                         )
                        ORDER BY created_at"""
                 ).fetchall()
                 if not queued_tasks:
@@ -1456,8 +1530,13 @@ class Store:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 row = self._conn.execute(
-                    """SELECT * FROM task
+                    f"""SELECT * FROM task
                        WHERE status = 'queued' AND agent_id = ?
+                         AND NOT EXISTS (
+                            SELECT 1 FROM task AS active
+                            WHERE active.issue_id = task.issue_id
+                              AND active.status IN ({_ACTIVE_TASK_STATUS_SQL})
+                         )
                        ORDER BY created_at LIMIT 1""",
                     (agent_id,),
                 ).fetchone()

@@ -138,6 +138,32 @@ def test_concurrent_claims_create_only_one_active_runtime_lease(tmp_path):
         verify.close()
 
 
+def test_runtime_machine_claim_serializes_active_taskruns_per_issue(
+    store: Store, tmp_path
+):
+    seed_runtime(store, tmp_path)
+    agent = store.create_agent("Runner", "", ["dry-run"], [])
+    issue = store.create_issue("same issue", "", AssigneeType.AGENT, agent.id)
+    first = store.enqueue_taskrun(issue.id, agent.id)
+    second = store.enqueue_taskrun(issue.id, agent.id)
+
+    first_claim = store.claim_taskrun_for_runtime_machine("rt-lease")
+    second_claim = store.claim_taskrun_for_runtime_machine("rt-lease")
+
+    assert first_claim is not None
+    assert first_claim.taskrun.id == first.id
+    assert second_claim is None
+    assert store.get_taskrun(second.id).status == TaskStatus.QUEUED
+
+    store.start_taskrun(first_claim.taskrun.id)
+    store.complete_taskrun(first_claim.taskrun.id, {"ok": True})
+    store.release_runtime_lease(first_claim.lease.id)
+    second_claim_after_terminal = store.claim_taskrun_for_runtime_machine("rt-lease")
+
+    assert second_claim_after_terminal is not None
+    assert second_claim_after_terminal.taskrun.id == second.id
+
+
 def test_daemon_executes_dry_run_taskrun_through_runtime_lease(store: Store, tmp_path):
     assert hasattr(models, "RuntimeLeaseStatus")
     RuntimeLeaseStatus = models.RuntimeLeaseStatus

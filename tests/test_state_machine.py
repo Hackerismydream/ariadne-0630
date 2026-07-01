@@ -4,6 +4,7 @@ retry chain, failure classification, stale claim recovery.
 Per docs/architecture/task-state-machine.md "Tests Required".
 """
 
+import sqlite3
 import threading
 
 import pytest
@@ -117,6 +118,125 @@ def test_atomic_claim(store, queued_task):
 
     claimed = [r for r in results if r is not None]
     assert len(claimed) == 1, f"expected exactly 1 claim, got {len(claimed)}"
+
+
+def test_claim_task_serializes_active_tasks_per_issue(store):
+    agent = store.create_agent("A", "", ["dry-run"], [])
+    issue = store.create_issue("same issue", "", AssigneeType.AGENT, agent.id)
+    first = store.enqueue_task(issue.id, agent.id)
+    second = store.enqueue_task(issue.id, agent.id)
+
+    claimed_first = store.claim_task(agent.id, "rt-1")
+    claimed_second = store.claim_task(agent.id, "rt-2")
+
+    assert claimed_first is not None
+    assert claimed_first.id == first.id
+    assert claimed_second is None
+    assert store.get_task(second.id).status == TaskStatus.QUEUED
+
+    store.start_task(claimed_first.id)
+    store.complete_task(claimed_first.id, {"ok": True})
+    claimed_after_terminal = store.claim_task(agent.id, "rt-2")
+
+    assert claimed_after_terminal is not None
+    assert claimed_after_terminal.id == second.id
+
+
+def test_claim_task_allows_parallel_active_tasks_for_different_issues(store):
+    agent = store.create_agent("A", "", ["dry-run"], [])
+    first_issue = store.create_issue("first issue", "", AssigneeType.AGENT, agent.id)
+    second_issue = store.create_issue("second issue", "", AssigneeType.AGENT, agent.id)
+    first = store.enqueue_task(first_issue.id, agent.id)
+    second = store.enqueue_task(second_issue.id, agent.id)
+
+    claimed_first = store.claim_task(agent.id, "rt-1")
+    claimed_second = store.claim_task(agent.id, "rt-2")
+
+    assert claimed_first is not None
+    assert claimed_second is not None
+    assert {claimed_first.id, claimed_second.id} == {first.id, second.id}
+
+
+def test_task_migration_resolves_duplicate_active_tasks_per_issue(tmp_path, caplog):
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE issue (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'backlog'
+                CHECK (status IN ('backlog', 'todo', 'in_progress', 'done', 'cancelled')),
+            assignee_type TEXT NOT NULL CHECK (assignee_type IN ('agent', 'squad')),
+            assignee_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE task (
+            id TEXT PRIMARY KEY,
+            issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL,
+            squad_id TEXT,
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK (status IN ('queued', 'preparing', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
+            attempt INTEGER NOT NULL DEFAULT 1,
+            max_attempts INTEGER NOT NULL DEFAULT 2,
+            parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
+            failure_reason TEXT
+                CHECK (failure_reason IS NULL OR failure_reason IN
+                       ('agent_error', 'timeout', 'runtime_offline', 'runtime_recovery',
+                        'manual', 'policy_blocked', 'provider_error', 'test_failure',
+                        'routing_failure', 'llm_parse_failure')),
+            dispatched_at TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            result TEXT,
+            error TEXT,
+            runtime_id TEXT,
+            handoff_prompt TEXT,
+            trace_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO issue
+            (id, title, description, status, assignee_type, assignee_id, created_at)
+            VALUES ('issue-1', 'legacy', '', 'todo', 'agent', 'agent-1',
+                    '2026-01-01T00:00:00+00:00');
+        INSERT INTO task
+            (id, issue_id, agent_id, status, dispatched_at, started_at, created_at)
+            VALUES
+            ('task-1', 'issue-1', 'agent-1', 'claimed',
+             '2026-01-01T00:00:00+00:00', NULL, '2026-01-01T00:00:00+00:00'),
+            ('task-2', 'issue-1', 'agent-1', 'running',
+             '2026-01-01T00:00:01+00:00', '2026-01-01T00:00:02+00:00',
+             '2026-01-01T00:00:01+00:00');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with caplog.at_level("WARNING"):
+        migrated = Store(str(db_path))
+    try:
+        active_count = migrated._conn.execute(
+            """SELECT COUNT(*) FROM task
+               WHERE issue_id = 'issue-1'
+                 AND status IN ('claimed', 'preparing', 'running')"""
+        ).fetchone()[0]
+        failed = migrated._conn.execute(
+            "SELECT * FROM task WHERE id = 'task-2'"
+        ).fetchone()
+        index_row = migrated._conn.execute(
+            """SELECT name FROM sqlite_master
+               WHERE type = 'index' AND name = 'idx_task_one_active_per_issue'"""
+        ).fetchone()
+    finally:
+        migrated.close()
+
+    assert active_count == 1
+    assert failed["status"] == "failed"
+    assert failed["failure_reason"] == "runtime_recovery"
+    assert index_row is not None
+    assert "duplicate active tasks for one issue" in caplog.text
 
 
 # ---------------------------------------------------------------------------

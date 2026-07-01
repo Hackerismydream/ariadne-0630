@@ -10,11 +10,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from ariadne.models import (
-    Agent,
     FailureReason,
     RuntimeLeaseStatus,
-    Squad,
-    SquadMember,
     Task,
     TaskRun,
     TaskRunClaim,
@@ -24,6 +21,7 @@ from ariadne.models import (
 from .benchmark_repo import BenchmarkRepo
 from .issue_repo import IssueRepo
 from .runtime_repo import RuntimeRepo
+from .squad_repo import SquadRepo
 from .skill_repo import SkillRepo
 from .base import (
     _ACTIVE_TASK_STATUS_SQL,
@@ -35,7 +33,7 @@ from .base import (
 )
 
 
-class Store(BenchmarkRepo, IssueRepo, RuntimeRepo, SkillRepo, StoreBase):
+class Store(BenchmarkRepo, IssueRepo, RuntimeRepo, SkillRepo, SquadRepo, StoreBase):
     """Backward-compatible facade over the lightweight store layers."""
 
     def claim_taskrun_for_runtime_machine(
@@ -554,106 +552,3 @@ class Store(BenchmarkRepo, IssueRepo, RuntimeRepo, SkillRepo, StoreBase):
         if recovered:
             self._conn.commit()
         return recovered
-
-    # ------------------------------------------------------------------
-    # Squad
-    # ------------------------------------------------------------------
-
-    def create_squad(
-        self, name: str, leader_id: str, instructions: str = ""
-    ) -> Squad:
-        squad = Squad(
-            id=_new_id("squad"),
-            name=name,
-            leader_id=leader_id,
-            instructions=instructions,
-        )
-        self._conn.execute(
-            """INSERT INTO squad (id, name, leader_id, instructions)
-               VALUES (?, ?, ?, ?)""",
-            (squad.id, squad.name, squad.leader_id, squad.instructions),
-        )
-        self._conn.commit()
-        return squad
-
-    def add_squad_member(
-        self, squad_id: str, member_id: str, role: str
-    ) -> SquadMember:
-        sm = SquadMember(
-            squad_id=squad_id,
-            member_type="agent",
-            member_id=member_id,
-            role=role,
-        )
-        self._conn.execute(
-            """INSERT INTO squad_member (id, squad_id, member_type, member_id, role)
-               VALUES (?, ?, ?, ?, ?)""",
-            (_new_id("sm"), sm.squad_id, sm.member_type, sm.member_id, sm.role),
-        )
-        self._conn.commit()
-        return sm
-
-    def get_squad(self, squad_id: str) -> Squad | None:
-        row = self._conn.execute(
-            "SELECT * FROM squad WHERE id = ?", (squad_id,)
-        ).fetchone()
-        return self.row_to(Squad, row) if row else None
-
-    def get_squad_members(self, squad_id: str) -> list[SquadMember]:
-        rows = self._conn.execute(
-            "SELECT * FROM squad_member WHERE squad_id = ?", (squad_id,)
-        ).fetchall()
-        return [self.row_to(SquadMember, r) for r in rows]
-
-    def get_squad_leader(self, squad_id: str) -> Agent:
-        squad = self.get_squad(squad_id)
-        if squad is None:
-            raise KeyError(f"squad not found: {squad_id}")
-        agent = self.get_agent(squad.leader_id)
-        if agent is None:
-            raise KeyError(f"leader agent not found: {squad.leader_id}")
-        return agent
-
-    # ------------------------------------------------------------------
-    # Activity log / trace
-    # ------------------------------------------------------------------
-
-    def log_activity(
-        self,
-        trace_id: str,
-        task_id: str | None,
-        event: str,
-        details: dict | None = None,
-    ) -> None:
-        """Write an activity log entry for a trace."""
-        self._conn.execute(
-            """INSERT INTO activity_log (id, trace_id, task_id, event, details, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (
-                _new_id("act"),
-                trace_id,
-                task_id,
-                event,
-                json.dumps(details) if details else None,
-                _now_iso(),
-            ),
-        )
-        self._conn.commit()
-
-    def get_timeline(self, trace_id: str) -> list[dict]:
-        """Return activity log entries for a trace, ordered by time."""
-        rows = self._conn.execute(
-            "SELECT * FROM activity_log WHERE trace_id = ? ORDER BY created_at",
-            (trace_id,),
-        ).fetchall()
-        return [
-            {
-                "id": r["id"],
-                "trace_id": r["trace_id"],
-                "task_id": r["task_id"],
-                "event": r["event"],
-                "details": json.loads(r["details"]) if r["details"] else None,
-                "created_at": r["created_at"],
-            }
-            for r in rows
-        ]

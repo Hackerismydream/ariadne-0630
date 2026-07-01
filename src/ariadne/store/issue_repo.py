@@ -10,8 +10,6 @@ from ariadne.models import (
     Issue,
     IssueStatus,
     IssueTimelineEvent,
-    LeaderDecision,
-    LeaderDecisionOutcome,
 )
 
 from .base import _new_id, _now_iso
@@ -71,74 +69,6 @@ class IssueRepo:
             (issue_id,),
         ).fetchall()
         return [self.row_to(IssueTimelineEvent, r) for r in rows]
-
-    def record_leader_decision(
-        self,
-        issue_id: str,
-        squad_id: str,
-        leader_task_id: str,
-        outcome: LeaderDecisionOutcome,
-        reason: str = "",
-        delegation_payload: dict | None = None,
-        created_taskrun_ids: list[str] | None = None,
-    ) -> LeaderDecision:
-        decision_id = _new_id("leaderdecision")
-        created_at = _now_iso()
-        self._conn.execute(
-            """INSERT INTO leader_decision
-               (id, issue_id, squad_id, leader_task_id, outcome, reason,
-                delegation_payload_json, created_taskrun_ids_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                decision_id,
-                issue_id,
-                squad_id,
-                leader_task_id,
-                outcome.value,
-                reason,
-                json.dumps(delegation_payload or {}),
-                json.dumps(created_taskrun_ids or []),
-                created_at,
-            ),
-        )
-        self._conn.commit()
-        decision = self.get_leader_decision(decision_id)
-        if decision is None:
-            raise KeyError(f"leader decision not found: {decision_id}")
-        self.append_issue_timeline_event(
-            issue_id,
-            "leader_decided",
-            actor_type="leader",
-            taskrun_id=leader_task_id,
-            leader_decision_id=decision.id,
-            payload={
-                "outcome": outcome.value,
-                "reason": reason,
-                "delegation_payload": delegation_payload or {},
-                "created_taskrun_ids": created_taskrun_ids or [],
-            },
-        )
-        return decision
-
-    def get_leader_decision(self, decision_id: str) -> LeaderDecision | None:
-        row = self._conn.execute(
-            "SELECT * FROM leader_decision WHERE id = ?", (decision_id,)
-        ).fetchone()
-        return self.row_to(LeaderDecision, row) if row else None
-
-    def list_leader_decisions(self, issue_id: str | None = None) -> list[LeaderDecision]:
-        if issue_id is None:
-            rows = self._conn.execute(
-                "SELECT * FROM leader_decision ORDER BY created_at, id"
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                """SELECT * FROM leader_decision
-                   WHERE issue_id = ?
-                   ORDER BY created_at, id""",
-                (issue_id,),
-            ).fetchall()
-        return [self.row_to(LeaderDecision, r) for r in rows]
 
     def create_issue(
         self,

@@ -7,6 +7,7 @@ import {
   issueStatusDisplay,
   taskStatusDisplay,
 } from "../lib/format";
+import { BACKEND_OPTIONS } from "../lib/api";
 
 test("maps backend task and issue statuses to terminal status codes", () => {
   assert.deepEqual(taskStatusDisplay("running"), {
@@ -83,4 +84,9 @@ test("turns structured SSE events into transcript lines", () => {
     }),
     /\.\.\.$/,
   );
+});
+
+test("uses backend names registered by the Python runtime", () => {
+  assert.deepEqual(BACKEND_OPTIONS, ["dry-run", "codex", "claude-code"]);
+  assert.equal(BACKEND_OPTIONS.includes("claude" as never), false);
 });

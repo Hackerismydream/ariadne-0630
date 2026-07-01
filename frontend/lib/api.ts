@@ -2,10 +2,13 @@ import type { IssueDetail, IssueSummary, RunResult } from "./types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+export const BACKEND_OPTIONS = ["dry-run", "codex", "claude-code"] as const;
+export type BackendName = (typeof BACKEND_OPTIONS)[number];
+
 export type NewIssueInput = {
   title: string;
   description: string;
-  backend: "dry-run" | "codex" | "claude";
+  backend: BackendName;
   mode: "direct" | "squad";
 };
 

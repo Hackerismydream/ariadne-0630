@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import type { NewIssueInput } from "../lib/api";
+import { BACKEND_OPTIONS, type NewIssueInput } from "../lib/api";
 
 export function ShellPrompt({
   disabled,
@@ -48,9 +48,11 @@ export function ShellPrompt({
             disabled={disabled}
             onChange={(event) => setBackend(event.target.value as NewIssueInput["backend"])}
           >
-            <option value="dry-run">dry-run</option>
-            <option value="codex">codex</option>
-            <option value="claude">claude</option>
+            {BACKEND_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
           </select>
         </label>
         <label>

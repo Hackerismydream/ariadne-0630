@@ -59,6 +59,10 @@
   </div>
   <div class="right">
     <div class="section">
+      <h2>IssueTimeline</h2>
+      <div id="issue-timeline"><div class="empty">Select an issue to see IssueTimeline.</div></div>
+    </div>
+    <div class="section">
       <h2>TaskRun Timeline</h2>
       <div id="timeline"><div class="empty">Select a TaskRun to see timeline.</div></div>
     </div>
@@ -70,6 +74,7 @@
 </div>
 <script>
 let selectedTaskRunId = null;
+let selectedIssueId = null;
 
 async function fetchJSON(url) {
   const res = await fetch(url);
@@ -99,8 +104,24 @@ function renderIssues(issues) {
   const el = document.getElementById('issues');
   if (!issues.length) { el.innerHTML = '<div class="empty">No issues. Create one via CLI.</div>'; return; }
   el.innerHTML = issues.map(i =>
-    `<div class="item"><span class="badge ${i.status}">${i.status}</span> ${i.title}</div>`
+    `<div class="item ${i.id === selectedIssueId ? 'selected' : ''}" onclick="selectIssue('${i.id}')"><span class="badge ${i.status}">${i.status}</span> ${i.title}</div>`
   ).join('');
+}
+
+async function selectIssue(issueId) {
+  selectedIssueId = issueId;
+  const el = document.getElementById('issue-timeline');
+  el.innerHTML = '<div class="empty">Loading IssueTimeline...</div>';
+  try {
+    const events = await fetchJSON(`/api/issues/${issueId}/timeline`);
+    if (!events.length) { el.innerHTML = '<div class="empty">No events recorded.</div>'; return; }
+    el.innerHTML = events.map(e =>
+      `<div class="timeline-event"><span class="time">${e.created_at}</span> <span class="event">[${e.event_type}]</span> ${e.taskrun_id ? 'taskrun=' + e.taskrun_id.slice(0,12) : ''}</div>`
+    ).join('');
+  } catch (e) {
+    el.innerHTML = '<div class="empty">Failed to load IssueTimeline.</div>';
+  }
+  refresh();
 }
 
 function renderTaskRuns(taskruns) {

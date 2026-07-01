@@ -114,6 +114,31 @@ def issue_list():
 
 
 @app.command()
+def issue_timeline(
+    issue_id: str = typer.Argument(...),
+):
+    """Show IssueTimeline events for an issue."""
+    store = _get_store()
+    issue = store.get_issue(issue_id)
+    if issue is None:
+        typer.echo(f"Issue not found: {issue_id}", err=True)
+        raise typer.Exit(1)
+    events = store.get_issue_timeline(issue_id)
+    if not events:
+        typer.echo("No issue timeline events.")
+        store.close()
+        return
+    typer.echo(f"IssueTimeline for {issue_id}:")
+    for event in events:
+        target = f" taskrun={event.taskrun_id}" if event.taskrun_id else ""
+        typer.echo(
+            f"  {event.created_at.isoformat()}  "
+            f"[{event.event_type}] actor={event.actor_type}{target}"
+        )
+    store.close()
+
+
+@app.command()
 def task_create(
     issue_id: str = typer.Argument(...),
     handoff_prompt: str = typer.Option("", "--handoff", "-h", help="Handoff prompt for the agent"),

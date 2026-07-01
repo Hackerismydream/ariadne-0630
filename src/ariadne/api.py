@@ -50,6 +50,34 @@ def list_issues():
     ]
 
 
+@app.get("/api/issues/{issue_id}/timeline")
+def issue_timeline(issue_id: str):
+    """Return IssueTimeline events for an Issue."""
+    store = _get_store()
+    issue = store.get_issue(issue_id)
+    if issue is None:
+        store.close()
+        raise HTTPException(status_code=404, detail="issue not found")
+    events = store.get_issue_timeline(issue_id)
+    store.close()
+    return [
+        {
+            "id": e.id,
+            "issue_id": e.issue_id,
+            "event_type": e.event_type,
+            "actor_type": e.actor_type,
+            "actor_id": e.actor_id,
+            "taskrun_id": e.taskrun_id,
+            "runtime_lease_id": e.runtime_lease_id,
+            "leader_decision_id": e.leader_decision_id,
+            "comment_id": e.comment_id,
+            "payload": e.payload,
+            "created_at": e.created_at.isoformat(),
+        }
+        for e in events
+    ]
+
+
 @app.get("/api/runtime-machines")
 def list_runtime_machines():
     """List registered RuntimeMachines."""

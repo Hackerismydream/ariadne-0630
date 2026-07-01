@@ -142,6 +142,22 @@ class RuntimeLease(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class IssueTimelineEvent(BaseModel):
+    """Issue-level product history event."""
+
+    id: str
+    issue_id: str
+    event_type: str
+    actor_type: str
+    actor_id: str | None = None
+    taskrun_id: str | None = None
+    runtime_lease_id: str | None = None
+    leader_decision_id: str | None = None
+    comment_id: str | None = None
+    payload: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # Issue / Task
 # ---------------------------------------------------------------------------

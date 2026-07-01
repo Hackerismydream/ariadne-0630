@@ -264,6 +264,20 @@ class Daemon:
 
     def _on_progress(self, update: ProgressUpdate) -> None:
         logger.info("progress: %s (step %d/%d)", update.summary, update.step, update.total)
+        task = self.store.get_task(update.task_id)
+        if task is not None:
+            self.store.append_issue_timeline_event(
+                task.issue_id,
+                "progress_reported",
+                actor_type="runtime",
+                actor_id=task.runtime_id,
+                taskrun_id=task.id,
+                payload={
+                    "summary": update.summary,
+                    "step": update.step,
+                    "total": update.total,
+                },
+            )
 
     def _recover_stale_claims(self) -> int:
         """Move stale claimed tasks back to queued."""

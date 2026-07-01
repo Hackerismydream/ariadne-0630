@@ -19,6 +19,7 @@ from ariadne.models import (
     FailureReason,
     Issue,
     IssueStatus,
+    IssueTimelineEvent,
     RuntimeCapability,
     RuntimeCapabilityStatus,
     RuntimeLease,
@@ -147,6 +148,23 @@ CREATE TABLE IF NOT EXISTS issue (
     assignee_id TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS issue_timeline_event (
+    id TEXT PRIMARY KEY,
+    issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    actor_type TEXT NOT NULL,
+    actor_id TEXT,
+    taskrun_id TEXT REFERENCES task(id),
+    runtime_lease_id TEXT REFERENCES runtime_lease(id),
+    leader_decision_id TEXT,
+    comment_id TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_issue_timeline_issue_time
+    ON issue_timeline_event(issue_id, created_at);
 
 CREATE TABLE IF NOT EXISTS task (
     id TEXT PRIMARY KEY,
@@ -284,6 +302,22 @@ class Store:
             status=IssueStatus(row["status"]),
             assignee_type=AssigneeType(row["assignee_type"]),
             assignee_id=row["assignee_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_issue_timeline_event(row: sqlite3.Row) -> IssueTimelineEvent:
+        return IssueTimelineEvent(
+            id=row["id"],
+            issue_id=row["issue_id"],
+            event_type=row["event_type"],
+            actor_type=row["actor_type"],
+            actor_id=row["actor_id"],
+            taskrun_id=row["taskrun_id"],
+            runtime_lease_id=row["runtime_lease_id"],
+            leader_decision_id=row["leader_decision_id"],
+            comment_id=row["comment_id"],
+            payload=json.loads(row["payload_json"]),
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
@@ -618,6 +652,23 @@ class Store:
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
+        self.append_issue_timeline_event(
+            task["issue_id"],
+            "lease_acquired",
+            actor_type="runtime",
+            actor_id=runtime_machine_id,
+            taskrun_id=task["id"],
+            runtime_lease_id=lease_id,
+        )
+        self.append_issue_timeline_event(
+            task["issue_id"],
+            "taskrun_preparing",
+            actor_type="runtime",
+            actor_id=runtime_machine_id,
+            taskrun_id=task["id"],
+            runtime_lease_id=lease_id,
+            payload={"status": "preparing"},
+        )
         taskrun = self.get_taskrun(task["id"])
         lease = self.get_runtime_lease(lease_id)
         if taskrun is None or lease is None:
@@ -687,6 +738,16 @@ class Store:
         lease = self.get_runtime_lease(lease_id)
         if lease is None:
             raise KeyError(f"runtime lease not found: {lease_id}")
+        task = self.get_task(lease.taskrun_id)
+        if task and lease.status == RuntimeLeaseStatus.RELEASED:
+            self.append_issue_timeline_event(
+                task.issue_id,
+                "lease_released",
+                actor_type="runtime",
+                actor_id=lease.runtime_machine_id,
+                taskrun_id=task.id,
+                runtime_lease_id=lease.id,
+            )
         return lease
 
     def revoke_runtime_lease(
@@ -703,6 +764,16 @@ class Store:
         lease = self.get_runtime_lease(lease_id)
         if lease is None:
             raise KeyError(f"runtime lease not found: {lease_id}")
+        task = self.get_task(lease.taskrun_id)
+        if task and lease.status == RuntimeLeaseStatus.REVOKED:
+            self.append_issue_timeline_event(
+                task.issue_id,
+                "lease_revoked",
+                actor_type="system",
+                taskrun_id=task.id,
+                runtime_lease_id=lease.id,
+                payload={"reason": reason},
+            )
         return lease
 
     def expire_runtime_leases(self) -> list[RuntimeLease]:
@@ -737,6 +808,24 @@ class Store:
                         task.id,
                     ),
                 )
+                self.append_issue_timeline_event(
+                    task.issue_id,
+                    "lease_expired",
+                    actor_type="system",
+                    taskrun_id=task.id,
+                    runtime_lease_id=row["id"],
+                )
+                self.append_issue_timeline_event(
+                    task.issue_id,
+                    "taskrun_failed",
+                    actor_type="system",
+                    taskrun_id=task.id,
+                    runtime_lease_id=row["id"],
+                    payload={
+                        "error": "runtime lease expired",
+                        "failure_reason": FailureReason.RUNTIME_OFFLINE.value,
+                    },
+                )
             expired.append(
                 RuntimeLease(
                     **{
@@ -752,6 +841,55 @@ class Store:
     # ------------------------------------------------------------------
     # Issue
     # ------------------------------------------------------------------
+
+    def append_issue_timeline_event(
+        self,
+        issue_id: str,
+        event_type: str,
+        actor_type: str = "system",
+        actor_id: str | None = None,
+        taskrun_id: str | None = None,
+        runtime_lease_id: str | None = None,
+        leader_decision_id: str | None = None,
+        comment_id: str | None = None,
+        payload: dict | None = None,
+    ) -> IssueTimelineEvent:
+        event_id = _new_id("evt")
+        created_at = _now_iso()
+        self._conn.execute(
+            """INSERT INTO issue_timeline_event
+               (id, issue_id, event_type, actor_type, actor_id, taskrun_id,
+                runtime_lease_id, leader_decision_id, comment_id, payload_json,
+                created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event_id,
+                issue_id,
+                event_type,
+                actor_type,
+                actor_id,
+                taskrun_id,
+                runtime_lease_id,
+                leader_decision_id,
+                comment_id,
+                json.dumps(payload or {}),
+                created_at,
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM issue_timeline_event WHERE id = ?", (event_id,)
+        ).fetchone()
+        return self._row_to_issue_timeline_event(row)
+
+    def get_issue_timeline(self, issue_id: str) -> list[IssueTimelineEvent]:
+        rows = self._conn.execute(
+            """SELECT * FROM issue_timeline_event
+               WHERE issue_id = ?
+               ORDER BY created_at, id""",
+            (issue_id,),
+        ).fetchall()
+        return [self._row_to_issue_timeline_event(r) for r in rows]
 
     def create_issue(
         self,
@@ -783,6 +921,12 @@ class Store:
             ),
         )
         self._conn.commit()
+        self.append_issue_timeline_event(
+            issue.id,
+            "issue_created",
+            actor_type="user",
+            payload={"title": issue.title},
+        )
         return issue
 
     def get_issue(self, issue_id: str) -> Issue | None:
@@ -804,6 +948,12 @@ class Store:
         issue = self.get_issue(issue_id)
         if issue is None:
             raise KeyError(f"issue not found: {issue_id}")
+        if status in (IssueStatus.DONE, IssueStatus.CANCELLED):
+            self.append_issue_timeline_event(
+                issue_id,
+                "issue_closed",
+                payload={"status": status.value},
+            )
         return issue
 
     # ------------------------------------------------------------------
@@ -886,6 +1036,12 @@ class Store:
         )
         self._conn.commit()
         self.log_activity(task.trace_id, task.id, "created", {"status": "queued"})
+        self.append_issue_timeline_event(
+            task.issue_id,
+            "taskrun_queued",
+            taskrun_id=task.id,
+            payload={"status": "queued", "attempt": task.attempt},
+        )
         return task
 
     def claim_task(self, agent_id: str, runtime_id: str) -> Task | None:
@@ -936,7 +1092,16 @@ class Store:
             (now, task_id),
         )
         self._conn.commit()
-        return self._load_task(task_id)
+        task = self._load_task(task_id)
+        self.append_issue_timeline_event(
+            task.issue_id,
+            "taskrun_started",
+            actor_type="runtime",
+            actor_id=task.runtime_id,
+            taskrun_id=task.id,
+            payload={"status": "running"},
+        )
+        return task
 
     def start_taskrun(self, taskrun_id: str) -> TaskRun:
         task = self.start_task(taskrun_id)
@@ -953,7 +1118,16 @@ class Store:
             (json.dumps(result), now, task_id),
         )
         self._conn.commit()
-        return self._load_task(task_id)
+        task = self._load_task(task_id)
+        self.append_issue_timeline_event(
+            task.issue_id,
+            "taskrun_completed",
+            actor_type="agent",
+            actor_id=task.agent_id,
+            taskrun_id=task.id,
+            payload={"result": result},
+        )
+        return task
 
     def complete_taskrun(self, taskrun_id: str, result: dict) -> TaskRun:
         task = self.complete_task(taskrun_id, result)
@@ -970,7 +1144,16 @@ class Store:
             (error, reason.value, now, task_id),
         )
         self._conn.commit()
-        return self._load_task(task_id)
+        task = self._load_task(task_id)
+        self.append_issue_timeline_event(
+            task.issue_id,
+            "taskrun_failed",
+            actor_type="agent",
+            actor_id=task.agent_id,
+            taskrun_id=task.id,
+            payload={"error": error, "failure_reason": reason.value},
+        )
+        return task
 
     def fail_taskrun(
         self, taskrun_id: str, error: str, reason: FailureReason
@@ -1006,6 +1189,22 @@ class Store:
                 (now, "taskrun_cancelled", lease.id),
             )
         self._conn.commit()
+        if lease is not None:
+            self.append_issue_timeline_event(
+                task.issue_id,
+                "lease_revoked",
+                actor_type="system",
+                taskrun_id=task.id,
+                runtime_lease_id=lease.id,
+                payload={"reason": "taskrun_cancelled"},
+            )
+        self.append_issue_timeline_event(
+            task.issue_id,
+            "taskrun_cancelled",
+            actor_type="system",
+            taskrun_id=task.id,
+            payload={"status": "cancelled"},
+        )
         return self._load_task(task_id)
 
     def cancel_taskrun(self, taskrun_id: str) -> TaskRun:
@@ -1059,6 +1258,20 @@ class Store:
         )
         self._conn.commit()
         self.log_activity(new_task.trace_id, new_task.id, "retried", {"attempt": new_task.attempt, "parent": old.id})
+        self.append_issue_timeline_event(
+            old.issue_id,
+            "retry_scheduled",
+            actor_type="system",
+            taskrun_id=old.id,
+            payload={"retry_taskrun_id": new_task.id, "attempt": new_task.attempt},
+        )
+        self.append_issue_timeline_event(
+            new_task.issue_id,
+            "taskrun_queued",
+            actor_type="system",
+            taskrun_id=new_task.id,
+            payload={"status": "queued", "attempt": new_task.attempt},
+        )
         return new_task
 
     def retry_taskrun(self, taskrun_id: str) -> TaskRun:

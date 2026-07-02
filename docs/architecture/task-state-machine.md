@@ -55,11 +55,17 @@ classification, retry chain via `parent_task_id`.
 | claimed | queued | claim timeout / daemon restart | daemon recovery |
 | claimed | cancelled | `cancel_task(task_id)` | user/API |
 | running | completed | `complete_task(task_id, result)` | daemon |
-| running | failed | `fail_task(task_id, error, reason)` | daemon |
+| running | failed | `fail_task(task_id, error, reason)` / `recover_orphans()` at daemon startup, `failure_reason=runtime_recovery` | daemon / daemon recovery |
 | running | cancelled | `cancel_task(task_id)` | user/API |
 
 **Illegal transitions are rejected with `InvalidStateTransition` error. No silent recovery.**
 Terminal task states (`completed`, `failed`, `cancelled`) cannot be cancelled.
+
+The `running → failed` recovery edge is the concrete implementation of the
+`runtime_recovery` failure reason (see below). A daemon that restarts after a
+crash reconciles `running` orphans *before* entering the claim loop — it never
+adopts the dead subprocess, only reclassifies and optionally re-queues the task.
+See [daemon-lifecycle.md](daemon-lifecycle.md).
 
 Retry does not mutate a failed task back to `queued`. `retry_task(task_id)`
 creates a new queued task with `parent_task_id` set to the failed task.

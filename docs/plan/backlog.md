@@ -39,4 +39,15 @@
 
 ## Non-blocking findings from verify
 
-(Will be populated as tasks are verified.)
+来自 deep-011 A-E review（2026-07-02，3 个 subagent 交叉核 diff）的三条 LOW，
+不阻塞，记录待后续处理：
+
+| # | Finding | 严重度 | 处理时机 |
+|---|---------|--------|---------|
+| L1 | `issue` 表迁移 `_migrate_issue_table_if_needed`（`store/base.py`）在 `DROP TABLE`/`RENAME` 之间无事务包裹，中途崩溃会丢表。仅 schema 升级那一次触发，本地 sqlite。`task` 表迁移同模式已有先例。 | 低 | 迁移逻辑重构时统一加事务 |
+| L2 | `api.py` `timeout_seconds = req.timeout_seconds or 300` 的 falsy 写法：当前 pydantic `Field(None, ge=1)` 拒 0，实际只在 None 兜底，安全；但若将来放宽校验会静默把 0 变 300。 | 低 | 改 `if x is None` 更稳，顺手即可 |
+| L3 | cancel 的 lease 语义从 `revoked`（带 `revoke_reason`）改为 `released`，timeline 事件 `lease_revoked`→`lease_released`。下游若有 telemetry/analytics 按 `revoked` 统计，会漏掉用户取消。 | 低 | 有 telemetry 消费方时对齐 |
+
+> HIGH（cancel 绕过状态机）已由 deep-011-G 修复（commit b585d4e）。
+> 两条 MEDIUM（cancel 跨进程投递失灵、daemon backend 静默降级 dry-run）已并入
+> deep-011-F 统一解决（同属"API/daemon 两进程"根问题）。

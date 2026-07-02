@@ -114,7 +114,7 @@ Queued TaskRun
 |--------|----------------|-------------|
 | `models.py` | Pydantic domain objects and enums | [task-state-machine.md](task-state-machine.md) |
 | `store.py` | SQLite schema, WAL setup, state transitions, product facts | [task-state-machine.md](task-state-machine.md) |
-| `daemon.py` | Runtime registration, heartbeat, claim, execution, retry | [task-state-machine.md](task-state-machine.md) |
+| `daemon.py` | Runtime registration, heartbeat, claim, execution, retry, orphan recovery | [task-state-machine.md](task-state-machine.md), [daemon-lifecycle.md](daemon-lifecycle.md) |
 | `policy.py` | Layered real-execution policy gate | [harness-backend.md](harness-backend.md) |
 | `briefing.py` | Squad briefing from roster and issue facts | [squad-orchestration.md](squad-orchestration.md) |
 | `orchestrator.py` | Leader action/no_action/failed/done loop | [squad-orchestration.md](squad-orchestration.md) |
@@ -135,6 +135,7 @@ Architecture decisions are recorded under `docs/adr/`.
 | [0011](../adr/0011-provider-session-resume-and-mcp-config.md) | Provider session resume and MCP config precedence |
 | [0012](../adr/0012-skills-as-capability-packages.md) | Skills as materialized capability packages |
 | [0013](../adr/0013-isolation-first-real-backend-execution.md) | Isolation-first real backend execution |
+| [0014](../adr/0014-daemon-lifecycle-and-crash-recovery.md) | Self-daemonizing resident daemon + `running` orphan recovery |
 
 ## Provenance
 

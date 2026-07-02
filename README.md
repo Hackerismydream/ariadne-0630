@@ -354,6 +354,14 @@ npm run dev
 Then open `http://localhost:3000`. The frontend expects the backend on
 `http://localhost:8000` unless `NEXT_PUBLIC_API_BASE_URL` is set.
 
+For real provider backends, keep an independent daemon running in another
+shell. `POST /api/issues` queues `codex` and `claude-code` work and returns
+immediately; the daemon claims and executes the queued TaskRuns.
+
+```bash
+uv run ariadne daemon-start --target-repo /path/to/target/repo
+```
+
 ## Five-minute v1 demo
 
 From a clean checkout:
@@ -510,11 +518,11 @@ Next.js frontend covers the needed inspection path.
 
 ## Current limitations
 
-- `POST /api/issues` currently reuses `runner.py` directly. It works for
-  dry-run and small real tasks, but long real-provider tasks still need better
-  detached execution and heartbeat UX.
-- `IssueStatus` has no first-class `failed` state yet. Failed TaskRuns are
-  visible, but issue-level failure semantics need hardening.
+- Real-provider `POST /api/issues` calls return detached, but the UI still
+  depends on a separately running `ariadne daemon-start` process to claim and
+  execute queued TaskRuns.
+- Long real-provider tasks still need heartbeat UX while the provider is
+  silent.
 - Some older CLI, API, benchmark, and policy paths still read SQLite through
   the `Store` connection for narrow reporting queries. New business logic
   should go through services and repositories.

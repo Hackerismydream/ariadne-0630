@@ -16,7 +16,7 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ariadne.models import AssigneeType, IssueStatus, TaskRun
@@ -32,6 +32,7 @@ app.add_middleware(
 )
 
 _db_path = os.environ.get("ARIADNE_DB", "ariadne.db")
+_DETACHED_BACKENDS = {"codex", "claude-code"}
 
 
 def _get_store() -> Store:
@@ -349,6 +350,7 @@ def create_issue(req: IssueCreateRequest):
     """Create an issue and run it through the shared intent runner."""
     store = _get_store()
     task_text = req.description.strip() or req.title
+    detach = req.backend in _DETACHED_BACKENDS
     try:
         result = run_intent(
             store,
@@ -358,14 +360,18 @@ def create_issue(req: IssueCreateRequest):
             squad=req.mode == "squad",
             agent_name=req.agent_name,
             target_repo=req.target_repo,
-            detach=req.detach,
+            detach=detach,
         )
     except ValueError as exc:
         store.close()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     payload = _run_result_payload(result)
+    payload["backend"] = req.backend
     store.close()
-    return payload
+    return JSONResponse(
+        content=payload,
+        status_code=202 if result.detached else 200,
+    )
 
 
 @app.get("/api/issues/{issue_id}")

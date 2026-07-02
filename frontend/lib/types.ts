@@ -59,6 +59,7 @@ export type IssueDetail = IssueSummary & {
 
 export type RunResult = {
   mode: "default" | "squad";
+  backend: "dry-run" | "codex" | "claude-code";
   detached: boolean;
   completed: boolean;
   runtime_id: string;

@@ -14,7 +14,9 @@ import typer
 
 from ariadne.backends import get_backend
 from ariadne.daemon import Daemon
+from ariadne.llm_decide import make_llm_decide
 from ariadne.models import AssigneeType
+from ariadne.orchestrator import Orchestrator
 from ariadne.runner import RunResult, run_intent
 from ariadne.store import Store
 
@@ -606,6 +608,7 @@ def daemon_start(
         store=store,
         backend_factory=get_backend,
         poll_interval=poll_interval,
+        orchestrator=Orchestrator(store=store, llm_decide=make_llm_decide()),
         target_repo_path=target_repo,
         write_workspace=write_workspace,
     )

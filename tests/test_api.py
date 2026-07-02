@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from ariadne import api
 from ariadne.api import app
 from ariadne.models import AssigneeType, IssueStatus
+from ariadne.runner import RunResult, RunTaskResult
 from ariadne.store import Store
 
 
@@ -128,12 +129,92 @@ def test_create_issue_runs_intent_and_returns_run_result(tmp_path, monkeypatch):
     assert res.status_code == 200
     data = res.json()
     assert data["mode"] == "default"
+    assert data["backend"] == "dry-run"
+    assert data["detached"] is False
     assert data["completed"] is True
     assert len(data["task_results"]) == 1
     assert data["issue_id"] == data["task_results"][0]["issue_id"]
     assert data["task_results"][0]["status"] == "completed"
     assert "diff" in data["task_results"][0]
     assert "changed_files" in data["task_results"][0]
+
+
+def test_post_issue_real_backend_detaches_without_blocking(monkeypatch):
+    captured = {}
+
+    def fake_run_intent(*args, **kwargs):
+        captured.update(kwargs)
+        return RunResult(
+            mode="default",
+            detached=kwargs["detach"],
+            completed=False,
+            runtime_id="ariadne-run",
+            target_repo=kwargs["target_repo"],
+            issue_id="issue-detached",
+            task_results=[
+                RunTaskResult(
+                    title="Use codex",
+                    issue_id="issue-detached",
+                    taskrun_id="taskrun-detached",
+                    agent_id="agent-codex",
+                    agent_name="Codex",
+                    status="queued",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("ariadne.api.run_intent", fake_run_intent)
+
+    res = TestClient(app).post(
+        "/api/issues",
+        json={
+            "title": "Use codex",
+            "description": "Queue real provider work",
+            "backend": "codex",
+            "mode": "direct",
+        },
+    )
+
+    assert res.status_code == 202
+    assert captured["detach"] is True
+    data = res.json()
+    assert data["backend"] == "codex"
+    assert data["detached"] is True
+    assert data["completed"] is False
+    assert data["issue_id"] == "issue-detached"
+    assert data["task_results"][0]["status"] == "queued"
+
+
+def test_post_issue_real_backend_queues_taskrun_for_daemon(tmp_path, monkeypatch):
+    db = str(tmp_path / "real-detach-api.db")
+    monkeypatch.setattr("ariadne.api._db_path", db)
+
+    res = TestClient(app).post(
+        "/api/issues",
+        json={
+            "title": "Use codex",
+            "description": "Queue real provider work",
+            "backend": "codex",
+            "mode": "direct",
+            "target_repo": str(tmp_path),
+        },
+    )
+
+    assert res.status_code == 202
+    data = res.json()
+    assert data["backend"] == "codex"
+    assert data["detached"] is True
+    assert data["completed"] is False
+    assert data["task_results"][0]["status"] == "queued"
+
+    store = Store(db)
+    try:
+        taskruns = store.list_taskruns_for_issue(data["issue_id"])
+        assert len(taskruns) == 1
+        assert taskruns[0].status.value == "queued"
+        assert store.list_runtime_machines() == []
+    finally:
+        store.close()
 
 
 def test_issue_detail_aggregates_issue_taskruns_and_diff(client):

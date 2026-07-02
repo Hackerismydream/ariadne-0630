@@ -19,6 +19,7 @@ from ariadne.models import (
     FailureReason,
     TaskStatus,
 )
+from ariadne.runner import run_intent
 from ariadne.store import Store
 
 
@@ -447,3 +448,48 @@ def test_cli_daemon_start_max_iterations(cli_runner, tmp_path, monkeypatch):
     result = cli_runner.invoke(app, ["daemon-start", "--max-iterations", "1", "--poll-interval", "0.01"])
     assert result.exit_code == 0
     assert "Daemon stopped" in result.stdout
+
+
+def test_cli_daemon_start_handles_detached_squad_leader_task(
+    cli_runner, tmp_path, monkeypatch
+):
+    db = str(tmp_path / "detached_squad.db")
+    monkeypatch.setattr("ariadne.cli._db_path", db)
+    store = Store(db)
+    try:
+        result = run_intent(
+            store,
+            ["Queue real squad work"],
+            backend="codex",
+            squad=True,
+            target_repo=str(tmp_path),
+            detach=True,
+        )
+        assert result.issue_id is not None
+        issue_id = result.issue_id
+    finally:
+        store.close()
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "daemon-start",
+            "--max-iterations",
+            "1",
+            "--poll-interval",
+            "0.01",
+            "--target-repo",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    store = Store(db)
+    try:
+        taskruns = store.list_taskruns_for_issue(issue_id)
+    finally:
+        store.close()
+    assert [taskrun.status for taskrun in taskruns] == [
+        TaskStatus.COMPLETED,
+        TaskStatus.QUEUED,
+    ]

@@ -213,6 +213,7 @@ def test_post_issue_real_backend_queues_taskrun_for_daemon(tmp_path, monkeypatch
         assert len(taskruns) == 1
         assert taskruns[0].status.value == "queued"
         assert taskruns[0].timeout_seconds == 300
+        assert taskruns[0].target_repo_path == str(tmp_path.resolve())
         assert store.list_runtime_machines() == []
     finally:
         store.close()

@@ -207,6 +207,31 @@ def test_runtime_machine_claim_respects_runtime_capacity(store: Store, tmp_path)
     assert claims[-1] is None
 
 
+def test_runtime_machine_does_not_claim_unavailable_backend_taskrun(
+    store: Store,
+    tmp_path,
+):
+    store.register_runtime_machine(
+        runtime_machine_id="rt-dry-only",
+        name="Dry Runtime",
+        workspace_root=str(tmp_path),
+    )
+    store.upsert_runtime_capability(
+        runtime_machine_id="rt-dry-only",
+        provider="dry-run",
+        command_path="dry-run",
+        status=RuntimeCapabilityStatus.AVAILABLE,
+    )
+    agent = store.create_agent("Codex Runner", "", ["codex"], [])
+    issue = store.create_issue("needs codex", "", AssigneeType.AGENT, agent.id)
+    taskrun = store.enqueue_taskrun(issue.id, agent.id)
+
+    claim = store.claim_taskrun_for_runtime_machine("rt-dry-only")
+
+    assert claim is None
+    assert store.get_taskrun(taskrun.id).status == TaskStatus.QUEUED
+
+
 def test_runtime_machine_claim_respects_agent_profile_capacity(
     store: Store, tmp_path
 ):

@@ -43,6 +43,8 @@ def deterministic_decide(
         # If any member has completed, deterministic says "done"
         if any(r["status"] == "completed" for r in completed_results):
             return None
+        if all(r["status"] == "failed" for r in completed_results):
+            return None
 
     if not briefing.roster:
         return None
@@ -141,6 +143,7 @@ class Orchestrator:
                 handoff_prompt=delegation.handoff_prompt,
                 trace_id=task.trace_id,
                 timeout_seconds=task.timeout_seconds,
+                target_repo_path=task.target_repo_path,
             )
             record = self.store.record_leader_decision(
                 issue_id=issue.id,
@@ -251,6 +254,7 @@ class Orchestrator:
                 squad_id=task.squad_id,
                 trace_id=task.trace_id,
                 timeout_seconds=task.timeout_seconds,
+                target_repo_path=task.target_repo_path,
             )
             logger.info(
                 "event loop: all members done, re-activated leader task %s for issue %s",

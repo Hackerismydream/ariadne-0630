@@ -223,6 +223,7 @@ class Task(BaseModel):
     attempt: int = 1
     max_attempts: int = 2
     timeout_seconds: int = 600
+    target_repo_path: str | None = None
     parent_task_id: str | None = None
     failure_reason: FailureReason | None = None
     dispatched_at: datetime | None = None

@@ -110,7 +110,7 @@ def test_retry_with_real_failure(store):
                 duration_seconds=0.0, command="fail",
             )
 
-    agent = store.create_agent("A", "", ["failing"], [])
+    agent = store.create_agent("A", "", ["dry-run"], [])
     issue = store.create_issue("retry test", "", AssigneeType.AGENT, agent.id)
     store.enqueue_task(issue.id, agent.id)
 

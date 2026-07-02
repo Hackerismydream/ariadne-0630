@@ -21,6 +21,7 @@ from ariadne.models import (
     ExecutionContext,
     ExecutionResult,
     FailureReason,
+    IssueStatus,
     ProgressUpdate,
     RuntimeCapabilityStatus,
     Task,
@@ -221,7 +222,7 @@ class Daemon:
             agent_name=agent_name,
             agent_instructions=instructions,
             handoff_prompt=task.handoff_prompt or f"Execute task for issue {task.issue_id}",
-            target_repo_path=self.target_repo_path,
+            target_repo_path=task.target_repo_path or self.target_repo_path,
             skill_refs=skill_refs,
             confirm_execution=self.write_workspace,
             timeout_seconds=task.timeout_seconds,
@@ -409,6 +410,7 @@ class Daemon:
         latest = self.store.get_task(task.id)
         if latest and latest.failure_reason == FailureReason.POLICY_BLOCKED:
             logger.info("task %s: policy blocked, no retry", task.id)
+            self._mark_direct_issue_failed_if_exhausted(latest)
             return
         if task.attempt < task.max_attempts:
             try:
@@ -416,8 +418,24 @@ class Daemon:
                 logger.info("retrying task %s as %s (attempt %d)", task.id, retried.id, retried.attempt)
             except MaxAttemptsExhausted:
                 logger.info("task %s: max attempts exhausted, no retry", task.id)
+                self._mark_direct_issue_failed_if_exhausted(latest or task)
         else:
             logger.info("task %s: attempt %d == max_attempts %d, no retry", task.id, task.attempt, task.max_attempts)
+            self._mark_direct_issue_failed_if_exhausted(latest or task)
+
+    def _mark_direct_issue_failed_if_exhausted(self, task: Task) -> None:
+        if task.squad_id:
+            return
+        issue = self.store.get_issue(task.issue_id)
+        if issue is None or issue.status in (
+            IssueStatus.DONE,
+            IssueStatus.FAILED,
+            IssueStatus.CANCELLED,
+        ):
+            return
+        taskruns = self.store.list_taskruns_for_issue(task.issue_id)
+        if taskruns and all(t.status == TaskStatus.FAILED for t in taskruns):
+            self.store.update_issue_status(task.issue_id, IssueStatus.FAILED)
 
     def _on_progress(self, update: ProgressUpdate) -> None:
         logger.info("progress: %s (step %d/%d)", update.summary, update.step, update.total)

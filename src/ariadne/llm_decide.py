@@ -132,7 +132,7 @@ def make_llm_decide(
         # If 3 consecutive failures, fall back to deterministic
         if failure_count[0] >= 3:
             logger.warning("LLM failed %d times, falling back to deterministic", failure_count[0])
-            return deterministic_decide(briefing, issue)
+            return deterministic_decide(briefing, issue, completed_results)
 
         try:
             from openai import OpenAI
@@ -154,13 +154,13 @@ def make_llm_decide(
                 failure_count[0] += 1
                 logger.warning("LLM parse failure #%d", failure_count[0])
                 if failure_count[0] >= 3:
-                    return deterministic_decide(briefing, issue)
-                return deterministic_decide(briefing, issue)
+                    return deterministic_decide(briefing, issue, completed_results)
+                return deterministic_decide(briefing, issue, completed_results)
             failure_count[0] = 0  # reset on success
             return result
         except Exception as e:
             failure_count[0] += 1
             logger.error("LLM API error #%d, falling back: %s", failure_count[0], e)
-            return deterministic_decide(briefing, issue)
+            return deterministic_decide(briefing, issue, completed_results)
 
     return decide

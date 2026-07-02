@@ -178,6 +178,7 @@ def _run_explicit_tasks(
                 agent.id,
                 handoff_prompt=task_text,
                 timeout_seconds=timeout_seconds,
+                target_repo_path=target_repo,
             )
         )
 
@@ -260,6 +261,7 @@ def _run_squad_intent(
         squad_id=squad_model.id,
         handoff_prompt=task_text,
         timeout_seconds=timeout_seconds,
+        target_repo_path=target_repo,
     )
 
     if detach:

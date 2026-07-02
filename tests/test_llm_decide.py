@@ -129,3 +129,39 @@ def test_graceful_on_api_error(briefing_and_issue, monkeypatch):
     # Should fall back to deterministic, not crash
     assert result is not None
     assert result.target_agent_id == member.id
+
+
+def test_api_error_fallback_preserves_completed_results(
+    briefing_and_issue,
+    monkeypatch,
+):
+    """API raises during re-evaluation → deterministic fallback sees failed results."""
+    briefing, issue, _member = briefing_and_issue
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-key-for-testing")
+    decide = make_llm_decide(api_key="fake-key")
+
+    import builtins
+    real_import = builtins.__import__
+
+    def fail_openai(name, *args, **kwargs):
+        if name == "openai":
+            raise RuntimeError("connection refused")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_openai)
+
+    result = decide(
+        briefing,
+        issue,
+        completed_results=[
+            {
+                "task_id": "taskrun-1",
+                "agent_name": "Coder",
+                "status": "failed",
+                "result": None,
+                "error": "timeout",
+            }
+        ],
+    )
+
+    assert result is None

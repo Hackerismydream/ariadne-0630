@@ -238,6 +238,7 @@ class TaskService:
             attempt=old.attempt + 1,
             max_attempts=old.max_attempts,
             timeout_seconds=old.timeout_seconds,
+            target_repo_path=old.target_repo_path,
             parent_task_id=old.id,
             handoff_prompt=old.handoff_prompt,
             trace_id=old.trace_id,
@@ -298,8 +299,6 @@ class TaskService:
             )
             if capability is not None:
                 return capability
-        if capabilities:
-            return capabilities[0]
         return None
 
     def _agent_capacity_available(self, agent_id: str) -> bool:

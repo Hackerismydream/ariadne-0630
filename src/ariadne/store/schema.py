@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS task (
     attempt INTEGER NOT NULL DEFAULT 1,
     max_attempts INTEGER NOT NULL DEFAULT 2,
     timeout_seconds INTEGER NOT NULL DEFAULT 600,
+    target_repo_path TEXT,
     parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
     failure_reason TEXT
         CHECK (failure_reason IS NULL OR failure_reason IN

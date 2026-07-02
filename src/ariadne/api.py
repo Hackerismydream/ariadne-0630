@@ -65,7 +65,6 @@ class IssueCreateRequest(BaseModel):
     backend: str = "dry-run"
     mode: Literal["direct", "squad"] = "direct"
     agent_name: str | None = None
-    detach: bool = False
     target_repo: str = "."
     timeout_seconds: int | None = Field(None, ge=1)
 

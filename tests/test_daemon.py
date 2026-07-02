@@ -18,6 +18,7 @@ from ariadne.models import (
     AssigneeType,
     ExecutionResult,
     FailureReason,
+    IssueStatus,
     TaskStatus,
 )
 from ariadne.runner import run_intent
@@ -129,13 +130,13 @@ def test_execute_fails_task(daemon, store):
                 command="failing",
             )
 
-    agent = store.create_agent("FailAgent", "", ["failing"], [])
+    agent = store.create_agent("FailAgent", "", ["dry-run"], [])
     issue = store.create_issue("fail test", "", AssigneeType.AGENT, agent.id)
     store.enqueue_task(issue.id, agent.id)
 
     failing_daemon = Daemon(
         store=store,
-        backend_factory=lambda name: FailingBackend() if name == "failing" else get_backend(name),
+        backend_factory=lambda name: FailingBackend(),
         poll_interval=0.01,
     )
     claimed = failing_daemon._poll_once()
@@ -164,7 +165,7 @@ def test_retry_on_failure(daemon, store):
                 duration_seconds=0.0, command="fail",
             )
 
-    agent = store.create_agent("A", "", ["failing"], [])
+    agent = store.create_agent("A", "", ["dry-run"], [])
     issue = store.create_issue("retry test", "", AssigneeType.AGENT, agent.id)
     store.enqueue_task(issue.id, agent.id)
 
@@ -195,7 +196,7 @@ def test_no_retry_when_exhausted(store):
                 duration_seconds=0.0, command="fail",
             )
 
-    agent = store.create_agent("A", "", ["failing"], [])
+    agent = store.create_agent("A", "", ["dry-run"], [])
     issue = store.create_issue("no retry", "", AssigneeType.AGENT, agent.id)
 
     store.enqueue_task(issue.id, agent.id)
@@ -215,6 +216,95 @@ def test_no_retry_when_exhausted(store):
         "SELECT * FROM task WHERE parent_task_id = ?", (claimed2.id,)
     ).fetchall()
     assert len(retries) == 0
+
+
+def test_direct_issue_is_failed_when_task_exhausts_retries(store):
+    """direct taskrun exhausted → issue status becomes failed"""
+
+    class FailBackend:
+        name = "failing"
+
+        def is_available(self):
+            return True
+
+        def execute(self, ctx, on_progress=None):
+            return ExecutionResult(
+                backend_name="failing",
+                success=False,
+                exit_code=1,
+                stdout="",
+                stderr="err",
+                diff=None,
+                changed_files=[],
+                test_result=None,
+                failure_reason=FailureReason.AGENT_ERROR,
+                duration_seconds=0.0,
+                command="fail",
+            )
+
+    agent = store.create_agent("A", "", ["dry-run"], [])
+    issue = store.create_issue("direct failure", "", AssigneeType.AGENT, agent.id)
+    task = store.enqueue_task(issue.id, agent.id)
+    store._conn.execute("UPDATE task SET max_attempts = 1 WHERE id = ?", (task.id,))
+    store._conn.commit()
+
+    d = Daemon(store=store, backend_factory=lambda n: FailBackend(), poll_interval=0.01)
+    claimed = d._poll_once()
+    d._execute_task(claimed)
+
+    assert store.get_task(claimed.id).status == TaskStatus.FAILED
+    assert store.get_issue(issue.id).status == IssueStatus.FAILED
+
+
+def test_daemon_uses_taskrun_target_repo_over_runtime_default(store, tmp_path):
+    """detached taskrun target repo survives until daemon execution"""
+    seen_paths = []
+
+    class CaptureBackend:
+        name = "capture"
+
+        def is_available(self):
+            return True
+
+        def execute(self, ctx, on_progress=None):
+            seen_paths.append(ctx.target_repo_path)
+            return ExecutionResult(
+                backend_name="capture",
+                success=True,
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                diff=None,
+                changed_files=[],
+                test_result=None,
+                failure_reason=None,
+                duration_seconds=0.0,
+                command="capture",
+                command_cwd=ctx.target_repo_path,
+                execution_repo_path=ctx.target_repo_path,
+            )
+
+    requested_repo = tmp_path / "requested"
+    requested_repo.mkdir()
+    agent = store.create_agent("A", "", ["dry-run"], [])
+    issue = store.create_issue("target repo", "", AssigneeType.AGENT, agent.id)
+    store.enqueue_taskrun(
+        issue.id,
+        agent.id,
+        target_repo_path=str(requested_repo),
+    )
+
+    d = Daemon(
+        store=store,
+        backend_factory=lambda n: CaptureBackend(),
+        poll_interval=0.01,
+        target_repo_path=str(tmp_path),
+        write_workspace=True,
+    )
+    claimed = d._poll_once()
+    d._execute_task(claimed)
+
+    assert seen_paths == [str(requested_repo)]
 
 
 # ---------------------------------------------------------------------------

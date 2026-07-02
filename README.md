@@ -105,7 +105,9 @@ sequenceDiagram
   B-->>D: progress, result, diff, changed files
   D->>S: complete, fail, retry, or cancel
   S->>DB: timeline and activity events
-  F-->>DB: SSE reads persisted events through api.py
+  F-->>A: SSE /api/events
+  A->>S: poll persisted events
+  S->>DB: read timeline and activity events
 ```
 
 ### Frontend module
@@ -340,7 +342,7 @@ uv run ariadne run --squad "Refactor this module" --backend dry-run
 Start the local API:
 
 ```bash
-uv run ariadne api-serve
+uv run ariadne api-serve --port 8000
 ```
 
 Start the local frontend in another shell:
@@ -440,7 +442,10 @@ AgentProfiles, Skills, LeaderDecisions, ExecutionPolicy, BenchmarkRuns, squad
 orchestration, backend isolation, backend registry extension, session resume,
 MCP config injection, skill verification evidence, and the clean-checkout demo.
 
-The frontend suite covers formatting helpers and the local browser smoke path.
+The frontend Node suite covers formatting helpers and API/SSE transcript
+mapping; `npm run build` verifies the Next.js production build. The Playwright
+browser smoke path is separate and requires backend/frontend dev servers:
+`cd frontend && npm run test:e2e`.
 
 ## Benchmark evidence
 

@@ -234,6 +234,25 @@ def test_completed_leader_action_does_not_make_failed_members_done(store, squad_
     ] == [LeaderDecisionOutcome.ACTION, LeaderDecisionOutcome.FAILED]
 
 
+def test_default_deterministic_failed_members_mark_issue_failed(store, squad_setup):
+    squad, leader, member, issue, leader_task = squad_setup
+    leader_reeval = complete_leader_action_then_fail_member_attempts(
+        store,
+        squad,
+        leader,
+        member,
+        issue,
+        leader_task,
+    )
+
+    Orchestrator(store=store).handle_leader_task(leader_reeval)
+
+    assert store.get_issue(issue.id).status == IssueStatus.FAILED
+    assert [
+        decision.outcome for decision in store.list_leader_decisions(issue.id)
+    ] == [LeaderDecisionOutcome.ACTION, LeaderDecisionOutcome.FAILED]
+
+
 def test_explicit_failed_decision_after_failed_members_marks_issue_failed(
     store,
     squad_setup,

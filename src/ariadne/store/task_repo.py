@@ -25,6 +25,7 @@ class TaskRepo:
         handoff_prompt: str | None = None,
         trace_id: str | None = None,
         timeout_seconds: int = 600,
+        target_repo_path: str | None = None,
     ) -> Task:
         return self._enqueue_task_record(
             "task",
@@ -34,6 +35,7 @@ class TaskRepo:
             handoff_prompt=handoff_prompt,
             trace_id=trace_id,
             timeout_seconds=timeout_seconds,
+            target_repo_path=target_repo_path,
         )
 
     def enqueue_taskrun(
@@ -44,6 +46,7 @@ class TaskRepo:
         handoff_prompt: str | None = None,
         trace_id: str | None = None,
         timeout_seconds: int = 600,
+        target_repo_path: str | None = None,
     ) -> TaskRun:
         task = self._enqueue_task_record(
             "taskrun",
@@ -53,6 +56,7 @@ class TaskRepo:
             handoff_prompt=handoff_prompt,
             trace_id=trace_id,
             timeout_seconds=timeout_seconds,
+            target_repo_path=target_repo_path,
         )
         return TaskRun(**task.model_dump())
 
@@ -65,6 +69,7 @@ class TaskRepo:
         handoff_prompt: str | None = None,
         trace_id: str | None = None,
         timeout_seconds: int = 600,
+        target_repo_path: str | None = None,
     ) -> Task:
         composed_handoff = self._compose_taskrun_handoff(agent_id, handoff_prompt)
         task = Task(
@@ -74,6 +79,7 @@ class TaskRepo:
             squad_id=squad_id,
             status=TaskStatus.QUEUED,
             timeout_seconds=timeout_seconds,
+            target_repo_path=target_repo_path,
             handoff_prompt=composed_handoff,
             trace_id=trace_id or _new_id("trace"),
             created_at=datetime.now(timezone.utc),
@@ -81,9 +87,9 @@ class TaskRepo:
         self._conn.execute(
             """INSERT INTO task
                (id, issue_id, agent_id, squad_id, status, attempt, max_attempts,
-                timeout_seconds, parent_task_id, failure_reason, handoff_prompt,
-                trace_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                timeout_seconds, target_repo_path, parent_task_id, failure_reason,
+                handoff_prompt, trace_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task.id,
                 task.issue_id,
@@ -93,6 +99,7 @@ class TaskRepo:
                 task.attempt,
                 task.max_attempts,
                 task.timeout_seconds,
+                task.target_repo_path,
                 task.parent_task_id,
                 None,
                 task.handoff_prompt,
@@ -270,9 +277,9 @@ class TaskRepo:
         self._conn.execute(
             """INSERT INTO task
                (id, issue_id, agent_id, squad_id, status, attempt, max_attempts,
-                timeout_seconds, parent_task_id, failure_reason, handoff_prompt,
-                trace_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                timeout_seconds, target_repo_path, parent_task_id, failure_reason,
+                handoff_prompt, trace_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task.id,
                 task.issue_id,
@@ -282,6 +289,7 @@ class TaskRepo:
                 task.attempt,
                 task.max_attempts,
                 task.timeout_seconds,
+                task.target_repo_path,
                 task.parent_task_id,
                 None,
                 task.handoff_prompt,

@@ -222,6 +222,7 @@ class StoreBase:
             or "policy_blocked" not in table_sql
             or "trace_id" not in cols
             or "timeout_seconds" not in cols
+            or "target_repo_path" not in cols
             or "test_failure" not in table_sql
         )
         if not needs_rebuild:
@@ -230,9 +231,10 @@ class StoreBase:
         select_exprs = []
         for column in (
             "id", "issue_id", "agent_id", "squad_id", "status", "attempt",
-            "max_attempts", "timeout_seconds", "parent_task_id", "failure_reason", "dispatched_at",
-            "started_at", "completed_at", "result", "error", "runtime_id",
-            "handoff_prompt", "trace_id", "created_at",
+            "max_attempts", "timeout_seconds", "target_repo_path", "parent_task_id",
+            "failure_reason", "dispatched_at", "started_at", "completed_at",
+            "result", "error", "runtime_id", "handoff_prompt", "trace_id",
+            "created_at",
         ):
             default = "600" if column == "timeout_seconds" else "NULL"
             select_exprs.append(column if column in cols else f"{default} AS {column}")
@@ -250,6 +252,7 @@ class StoreBase:
                 attempt INTEGER NOT NULL DEFAULT 1,
                 max_attempts INTEGER NOT NULL DEFAULT 2,
                 timeout_seconds INTEGER NOT NULL DEFAULT 600,
+                target_repo_path TEXT,
                 parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
                 failure_reason TEXT
                     CHECK (failure_reason IS NULL OR failure_reason IN
@@ -271,8 +274,9 @@ class StoreBase:
         self._conn.execute(
             f"""INSERT INTO task_new
                (id, issue_id, agent_id, squad_id, status, attempt, max_attempts,
-                timeout_seconds, parent_task_id, failure_reason, dispatched_at, started_at,
-                completed_at, result, error, runtime_id, handoff_prompt,
+                timeout_seconds, target_repo_path, parent_task_id, failure_reason,
+                dispatched_at, started_at, completed_at, result, error, runtime_id,
+                handoff_prompt,
                 trace_id, created_at)
                SELECT {", ".join(select_exprs)} FROM task"""
         )

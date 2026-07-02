@@ -79,6 +79,7 @@ def run_intent(
     max_concurrent: int | None = None,
     write_workspace: bool = False,
     detach: bool = False,
+    timeout_seconds: int = 600,
     poll_interval: float = 0.001,
     max_iterations: int | None = None,
     runtime_id: str = "ariadne-run",
@@ -105,6 +106,7 @@ def run_intent(
             max_concurrent=concurrency,
             write_workspace=write_workspace,
             detach=detach,
+            timeout_seconds=timeout_seconds,
             poll_interval=poll_interval,
             max_iterations=max_iterations or 20,
             runtime_id=runtime_id,
@@ -122,6 +124,7 @@ def run_intent(
         max_concurrent=concurrency,
         write_workspace=write_workspace,
         detach=detach,
+        timeout_seconds=timeout_seconds,
         poll_interval=poll_interval,
         max_iterations=max_iterations or max(10, len(clean_tasks) * 4),
         runtime_id=runtime_id,
@@ -140,6 +143,7 @@ def _run_explicit_tasks(
     max_concurrent: int,
     write_workspace: bool,
     detach: bool,
+    timeout_seconds: int,
     poll_interval: float,
     max_iterations: int,
     runtime_id: str,
@@ -173,6 +177,7 @@ def _run_explicit_tasks(
                 issue.id,
                 agent.id,
                 handoff_prompt=task_text,
+                timeout_seconds=timeout_seconds,
             )
         )
 
@@ -228,6 +233,7 @@ def _run_squad_intent(
     max_concurrent: int,
     write_workspace: bool,
     detach: bool,
+    timeout_seconds: int,
     poll_interval: float,
     max_iterations: int,
     runtime_id: str,
@@ -253,6 +259,7 @@ def _run_squad_intent(
         squad_model.leader_id,
         squad_id=squad_model.id,
         handoff_prompt=task_text,
+        timeout_seconds=timeout_seconds,
     )
 
     if detach:

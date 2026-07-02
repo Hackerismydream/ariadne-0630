@@ -446,16 +446,57 @@ class _ShellBackend:
 
                 stdout_thread = threading.Thread(target=read_stdout, daemon=True)
                 stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+                heartbeat_stop = threading.Event()
+
+                def emit_backend_heartbeats() -> None:
+                    interval = max(float(context.heartbeat_interval_seconds), 0.0)
+                    if interval <= 0:
+                        return
+                    while not heartbeat_stop.wait(interval):
+                        if proc.poll() is not None:
+                            return
+                        elapsed = time.monotonic() - started
+                        if on_progress:
+                            on_progress(
+                                ProgressUpdate(
+                                    task_id=context.task_id,
+                                    summary=(
+                                        f"{self.name} still running "
+                                        f"({int(elapsed)}s/{context.timeout_seconds}s)"
+                                    ),
+                                    step=0,
+                                    total=0,
+                                    timestamp=datetime.now(timezone.utc),
+                                    event_type="backend_heartbeat",
+                                    payload={
+                                        "backend": self.name,
+                                        "taskrun_id": context.task_id,
+                                        "elapsed_seconds": int(elapsed),
+                                        "timeout_seconds": context.timeout_seconds,
+                                        "execution_repo_path": exec_path,
+                                        "pid": proc.pid,
+                                    },
+                                )
+                            )
+
+                heartbeat_thread = threading.Thread(
+                    target=emit_backend_heartbeats,
+                    daemon=True,
+                )
                 stdout_thread.start()
                 stderr_thread.start()
+                heartbeat_thread.start()
                 try:
                     wait_result = proc.wait(timeout=context.timeout_seconds)
+                    heartbeat_stop.set()
                     exit_code = proc.returncode if proc.returncode is not None else wait_result
                     stdout_thread.join(timeout=1)
                     stderr_thread.join(timeout=1)
+                    heartbeat_thread.join(timeout=1)
                     stdout = "".join(stdout_lines)
                     stderr = "".join(stderr_lines)
                 except subprocess.TimeoutExpired:
+                    heartbeat_stop.set()
                     try:
                         os.killpg(proc.pid, signal.SIGKILL)
                     except Exception:
@@ -466,6 +507,7 @@ class _ShellBackend:
                         pass
                     stdout_thread.join(timeout=1)
                     stderr_thread.join(timeout=1)
+                    heartbeat_thread.join(timeout=1)
                     duration = time.monotonic() - started
                     return ExecutionResult(
                         backend_name=self.name, success=False, exit_code=-1,

@@ -11,6 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ariadne.backends import get_backend
+from ariadne.backends import _ShellBackend, available_backends, register_backend
 from ariadne.cli import app
 from ariadne.daemon import Daemon
 from ariadne.models import (
@@ -21,6 +22,24 @@ from ariadne.models import (
 )
 from ariadne.runner import run_intent
 from ariadne.store import Store
+
+
+class SilentSleepBackend(_ShellBackend):
+    name = "silent-sleep"
+    template_env_var = "ARIADNE_SILENT_SLEEP_COMMAND_TEMPLATE"
+    default_template = (
+        f"{shlex.quote(sys.executable)} -c "
+        "\"import time; time.sleep(0.2)\""
+    )
+    executable_name = sys.executable
+
+    def is_available(self) -> bool:
+        return True
+
+
+def ensure_silent_sleep_backend_registered() -> None:
+    if SilentSleepBackend.name not in available_backends():
+        register_backend(SilentSleepBackend())
 
 
 @pytest.fixture
@@ -493,3 +512,55 @@ def test_cli_daemon_start_handles_detached_squad_leader_task(
         TaskStatus.COMPLETED,
         TaskStatus.QUEUED,
     ]
+
+
+def test_backend_heartbeat_events_are_persisted_during_silent_process(
+    store,
+    tmp_path,
+):
+    ensure_silent_sleep_backend_registered()
+    agent = store.create_agent("Silent", "", [SilentSleepBackend.name], [])
+    issue = store.create_issue("Silent work", "", AssigneeType.AGENT, agent.id)
+    taskrun = store.enqueue_taskrun(issue.id, agent.id)
+    daemon = Daemon(
+        store=store,
+        backend_factory=get_backend,
+        runtime_id="rt-heartbeat",
+        poll_interval=0.01,
+        target_repo_path=str(tmp_path),
+        write_workspace=True,
+        backend_heartbeat_interval=0.05,
+    )
+
+    daemon.start(max_iterations=1)
+
+    events = store.get_timeline(taskrun.trace_id)
+    heartbeats = [event for event in events if event["event"] == "backend_heartbeat"]
+    assert heartbeats
+    assert heartbeats[0]["details"]["backend"] == SilentSleepBackend.name
+    assert heartbeats[0]["details"]["taskrun_id"] == taskrun.id
+    assert heartbeats[0]["details"]["elapsed_seconds"] >= 0
+    assert heartbeats[0]["details"]["timeout_seconds"] == 600
+
+
+def test_active_lease_heartbeat_updates_during_long_execution(store, tmp_path):
+    ensure_silent_sleep_backend_registered()
+    agent = store.create_agent("Silent", "", [SilentSleepBackend.name], [])
+    issue = store.create_issue("Silent work", "", AssigneeType.AGENT, agent.id)
+    taskrun = store.enqueue_taskrun(issue.id, agent.id)
+    daemon = Daemon(
+        store=store,
+        backend_factory=get_backend,
+        runtime_id="rt-lease-heartbeat",
+        poll_interval=0.01,
+        target_repo_path=str(tmp_path),
+        write_workspace=True,
+        backend_heartbeat_interval=0.05,
+    )
+
+    daemon.start(max_iterations=1)
+
+    leases = store.list_runtime_leases(taskrun.id)
+    assert len(leases) == 1
+    assert leases[0].last_heartbeat_at is not None
+    assert leases[0].last_heartbeat_at > leases[0].acquired_at

@@ -140,6 +140,7 @@ class Orchestrator:
                 squad_id=task.squad_id,
                 handoff_prompt=delegation.handoff_prompt,
                 trace_id=task.trace_id,
+                timeout_seconds=task.timeout_seconds,
             )
             record = self.store.record_leader_decision(
                 issue_id=issue.id,
@@ -249,6 +250,7 @@ class Orchestrator:
                 agent_profile_id=squad.leader_id,
                 squad_id=task.squad_id,
                 trace_id=task.trace_id,
+                timeout_seconds=task.timeout_seconds,
             )
             logger.info(
                 "event loop: all members done, re-activated leader task %s for issue %s",

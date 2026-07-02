@@ -405,6 +405,7 @@ def test_execution_context_round_trip():
     assert restored == ctx
     # defaults
     assert ctx.timeout_seconds == 600
+    assert ctx.heartbeat_interval_seconds == 10.0
     assert ctx.confirm_execution is False
     assert ctx.model is None
     assert ctx.effort is None
@@ -426,6 +427,8 @@ def test_progress_update_round_trip():
         message_type="tool_use",
         tool_name="pytest",
         content="running tests",
+        event_type="backend_heartbeat",
+        payload={"elapsed_seconds": 10, "timeout_seconds": 300},
     )
     data = update.model_dump_json()
     restored = ProgressUpdate.model_validate_json(data)
@@ -435,6 +438,8 @@ def test_progress_update_round_trip():
     assert restored.message_type == "tool_use"
     assert restored.tool_name == "pytest"
     assert restored.content == "running tests"
+    assert restored.event_type == "backend_heartbeat"
+    assert restored.payload == {"elapsed_seconds": 10, "timeout_seconds": 300}
 
 
 def test_datetime_serializes_iso():

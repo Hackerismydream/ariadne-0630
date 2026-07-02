@@ -47,6 +47,7 @@ class Daemon:
         target_repo_path: str = ".",
         write_workspace: bool = False,
         max_concurrent_taskruns: int | None = None,
+        backend_heartbeat_interval: float = 10.0,
     ):
         self.store = store
         self.backend_factory = backend_factory
@@ -58,6 +59,7 @@ class Daemon:
         self.target_repo_path = target_repo_path
         self.write_workspace = write_workspace
         self.max_concurrent_taskruns = max_concurrent_taskruns
+        self.backend_heartbeat_interval = backend_heartbeat_interval
         self._running = False
         self._last_heartbeat: datetime | None = None
         self._runtime_registered = False
@@ -222,6 +224,8 @@ class Daemon:
             target_repo_path=self.target_repo_path,
             skill_refs=skill_refs,
             confirm_execution=self.write_workspace,
+            timeout_seconds=task.timeout_seconds,
+            heartbeat_interval_seconds=self.backend_heartbeat_interval,
             trace_id=task.trace_id,
             resume_session_id=self._resume_session_id_for_task(task),
             mcp_config_path=mcp_config_path,
@@ -418,19 +422,34 @@ class Daemon:
     def _on_progress(self, update: ProgressUpdate) -> None:
         logger.info("progress: %s (step %d/%d)", update.summary, update.step, update.total)
         task = self.store.get_task(update.task_id)
-        if task is not None:
-            self.store.append_issue_timeline_event(
-                task.issue_id,
-                "progress_reported",
-                actor_type="runtime",
-                actor_id=task.runtime_id,
-                taskrun_id=task.id,
-                payload={
-                    "summary": update.summary,
-                    "step": update.step,
-                    "total": update.total,
-                },
-            )
+        if task is None:
+            return
+
+        if update.event_type == "backend_heartbeat":
+            if task.trace_id:
+                self.store.log_activity(
+                    task.trace_id,
+                    task.id,
+                    "backend_heartbeat",
+                    update.payload,
+                )
+            lease = self.store.get_active_runtime_lease_for_taskrun(task.id)
+            if lease is not None:
+                self.store.heartbeat_runtime_lease(lease.id)
+            return
+
+        self.store.append_issue_timeline_event(
+            task.issue_id,
+            "progress_reported",
+            actor_type="runtime",
+            actor_id=task.runtime_id,
+            taskrun_id=task.id,
+            payload={
+                "summary": update.summary,
+                "step": update.step,
+                "total": update.total,
+            },
+        )
 
     def _recover_stale_claims(self) -> int:
         """Move stale claimed tasks back to queued."""

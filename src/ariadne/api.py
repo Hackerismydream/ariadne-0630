@@ -67,6 +67,7 @@ class IssueCreateRequest(BaseModel):
     agent_name: str | None = None
     detach: bool = False
     target_repo: str = "."
+    timeout_seconds: int | None = Field(None, ge=1)
 
 
 class IssuePatchRequest(BaseModel):
@@ -351,6 +352,7 @@ def create_issue(req: IssueCreateRequest):
     store = _get_store()
     task_text = req.description.strip() or req.title
     detach = req.backend in _DETACHED_BACKENDS
+    timeout_seconds = req.timeout_seconds or 300
     try:
         result = run_intent(
             store,
@@ -361,6 +363,7 @@ def create_issue(req: IssueCreateRequest):
             agent_name=req.agent_name,
             target_repo=req.target_repo,
             detach=detach,
+            timeout_seconds=timeout_seconds,
         )
     except ValueError as exc:
         store.close()

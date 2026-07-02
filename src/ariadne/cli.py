@@ -381,6 +381,11 @@ def run_command(
         "--max-iterations",
         help="Safety cap for blocking daemon iterations.",
     ),
+    timeout: int = typer.Option(
+        600,
+        "--timeout",
+        help="Backend execution timeout in seconds.",
+    ),
 ):
     """Run task descriptions through Ariadne without exposing UUID plumbing."""
     store = _get_store()
@@ -397,6 +402,7 @@ def run_command(
             write_workspace=write_workspace,
             detach=detach,
             max_iterations=max_iterations,
+            timeout_seconds=timeout,
         )
         _print_run_result(result)
         if not result.detached and not result.completed:

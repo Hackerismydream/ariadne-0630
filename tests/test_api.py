@@ -212,9 +212,91 @@ def test_post_issue_real_backend_queues_taskrun_for_daemon(tmp_path, monkeypatch
         taskruns = store.list_taskruns_for_issue(data["issue_id"])
         assert len(taskruns) == 1
         assert taskruns[0].status.value == "queued"
+        assert taskruns[0].timeout_seconds == 300
         assert store.list_runtime_machines() == []
     finally:
         store.close()
+
+
+def test_post_issue_real_backend_uses_ui_default_timeout(monkeypatch):
+    captured = {}
+
+    def fake_run_intent(*args, **kwargs):
+        captured.update(kwargs)
+        return RunResult(
+            mode="default",
+            detached=True,
+            completed=False,
+            runtime_id="ariadne-run",
+            target_repo=kwargs["target_repo"],
+            issue_id="issue-timeout",
+            task_results=[
+                RunTaskResult(
+                    title="Use codex",
+                    issue_id="issue-timeout",
+                    taskrun_id="taskrun-timeout",
+                    agent_id="agent-codex",
+                    agent_name="Codex",
+                    status="queued",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("ariadne.api.run_intent", fake_run_intent)
+
+    res = TestClient(app).post(
+        "/api/issues",
+        json={
+            "title": "Use codex",
+            "description": "Queue real provider work",
+            "backend": "codex",
+            "mode": "direct",
+        },
+    )
+
+    assert res.status_code == 202
+    assert captured["timeout_seconds"] == 300
+
+
+def test_post_issue_real_backend_timeout_can_be_overridden(monkeypatch):
+    captured = {}
+
+    def fake_run_intent(*args, **kwargs):
+        captured.update(kwargs)
+        return RunResult(
+            mode="default",
+            detached=True,
+            completed=False,
+            runtime_id="ariadne-run",
+            target_repo=kwargs["target_repo"],
+            issue_id="issue-timeout",
+            task_results=[
+                RunTaskResult(
+                    title="Use codex",
+                    issue_id="issue-timeout",
+                    taskrun_id="taskrun-timeout",
+                    agent_id="agent-codex",
+                    agent_name="Codex",
+                    status="queued",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("ariadne.api.run_intent", fake_run_intent)
+
+    res = TestClient(app).post(
+        "/api/issues",
+        json={
+            "title": "Use codex",
+            "description": "Queue real provider work",
+            "backend": "codex",
+            "mode": "direct",
+            "timeout_seconds": 120,
+        },
+    )
+
+    assert res.status_code == 202
+    assert captured["timeout_seconds"] == 120
 
 
 def test_issue_detail_aggregates_issue_taskruns_and_diff(client):

@@ -237,6 +237,7 @@ class TaskService:
             status=TaskStatus.QUEUED,
             attempt=old.attempt + 1,
             max_attempts=old.max_attempts,
+            timeout_seconds=old.timeout_seconds,
             parent_task_id=old.id,
             handoff_prompt=old.handoff_prompt,
             trace_id=old.trace_id,

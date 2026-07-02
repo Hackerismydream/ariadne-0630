@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS task (
         CHECK (status IN ('queued', 'preparing', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
     attempt INTEGER NOT NULL DEFAULT 1,
     max_attempts INTEGER NOT NULL DEFAULT 2,
+    timeout_seconds INTEGER NOT NULL DEFAULT 600,
     parent_task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
     failure_reason TEXT
         CHECK (failure_reason IS NULL OR failure_reason IN

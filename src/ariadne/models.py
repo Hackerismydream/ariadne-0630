@@ -222,6 +222,7 @@ class Task(BaseModel):
     status: TaskStatus
     attempt: int = 1
     max_attempts: int = 2
+    timeout_seconds: int = 600
     parent_task_id: str | None = None
     failure_reason: FailureReason | None = None
     dispatched_at: datetime | None = None
@@ -395,6 +396,7 @@ class ExecutionContext(BaseModel):
     target_repo_path: str
     skill_refs: list[str]
     timeout_seconds: int = 600
+    heartbeat_interval_seconds: float = 10.0
     confirm_execution: bool = False
     model: str | None = None
     effort: str | None = None
@@ -466,3 +468,5 @@ class ProgressUpdate(BaseModel):
     message_type: str | None = None
     tool_name: str | None = None
     content: str | None = None
+    event_type: str | None = None
+    payload: dict = Field(default_factory=dict)

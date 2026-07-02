@@ -3,8 +3,12 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { eventsUrl, getIssue } from "../lib/api";
-import { retryTreeLines, taskrunDiffExplanation } from "../lib/format";
+import { cancelIssue, eventsUrl, getIssue } from "../lib/api";
+import {
+  hasCancellableTaskruns,
+  retryTreeLines,
+  taskrunDiffExplanation,
+} from "../lib/format";
 import type {
   ActivityStreamEvent,
   IssueDetail,
@@ -21,6 +25,7 @@ export function IssueDetailPage({ issueId }: { issueId: string }) {
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [events, setEvents] = useState<TranscriptEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const seenEvents = useRef(new Set<string>());
   const taskrunIds = useMemo(() => new Set(detail?.taskruns.map((taskrun) => taskrun.id) ?? []), [detail]);
   const taskrunIdsRef = useRef(taskrunIds);
@@ -99,6 +104,7 @@ export function IssueDetailPage({ issueId }: { issueId: string }) {
   const completedTaskruns =
     detail?.taskruns.filter((taskrun) => taskrun.status === "completed").length ?? 0;
   const taskrunTotal = detail?.taskruns.length ?? 0;
+  const canCancel = detail ? hasCancellableTaskruns(detail.taskruns) : false;
   const retryLines = useMemo(() => (detail ? retryTreeLines(detail.taskruns) : []), [detail]);
   const diffExplanation = useMemo(() => {
     if (!detail) {
@@ -106,6 +112,19 @@ export function IssueDetailPage({ issueId }: { issueId: string }) {
     }
     return detail.taskruns.map(taskrunDiffExplanation).find(Boolean) ?? "(no diff captured)";
   }, [detail]);
+
+  const cancelCurrentIssue = useCallback(async () => {
+    setCancelling(true);
+    setError(null);
+    try {
+      await cancelIssue(issueId);
+      await loadIssue();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCancelling(false);
+    }
+  }, [issueId, loadIssue]);
 
   return (
     <main className="terminal-shell">
@@ -119,7 +138,24 @@ export function IssueDetailPage({ issueId }: { issueId: string }) {
 
         {error ? <Pane title="ERROR"><div className="text-terminal-error">{error}</div></Pane> : null}
 
-        <Pane title={`ISSUE ${issueId}`} right={detail ? <IssueStatusBadge status={detail.status} /> : "LOADING"}>
+        <Pane
+          title={`ISSUE ${issueId}`}
+          right={detail ? (
+            <div className="flex items-center gap-[2ch]">
+              <IssueStatusBadge status={detail.status} />
+              {canCancel ? (
+                <button
+                  className="terminal-button"
+                  disabled={cancelling}
+                  onClick={() => void cancelCurrentIssue()}
+                  type="button"
+                >
+                  [ CANCEL ]
+                </button>
+              ) : null}
+            </div>
+          ) : "LOADING"}
+        >
           {detail ? (
             <div className="grid gap-2">
               <div>title    : {detail.title}</div>

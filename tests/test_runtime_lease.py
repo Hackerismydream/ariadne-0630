@@ -9,6 +9,7 @@ from ariadne.daemon import Daemon
 from ariadne import models
 from ariadne.models import (
     AssigneeType,
+    IssueStatus,
     RuntimeCapabilityStatus,
     TaskStatus,
 )
@@ -98,7 +99,7 @@ def test_expire_runtime_leases_marks_taskrun_failed(store: Store, tmp_path):
     assert failed.failure_reason.value == "runtime_offline"
 
 
-def test_cancel_taskrun_revokes_active_runtime_lease(store: Store, tmp_path):
+def test_cancel_taskrun_releases_active_runtime_lease(store: Store, tmp_path):
     assert hasattr(models, "RuntimeLeaseStatus")
     RuntimeLeaseStatus = models.RuntimeLeaseStatus
 
@@ -112,8 +113,45 @@ def test_cancel_taskrun_revokes_active_runtime_lease(store: Store, tmp_path):
 
     assert cancelled.status == TaskStatus.CANCELLED
     assert lease is not None
-    assert lease.status == RuntimeLeaseStatus.REVOKED
-    assert lease.revoke_reason == "taskrun_cancelled"
+    assert lease.status == RuntimeLeaseStatus.RELEASED
+    assert lease.revoke_reason is None
+
+
+def test_cancel_running_issue_marks_task_cancelled_and_releases_lease(
+    store: Store,
+    tmp_path,
+):
+    assert hasattr(models, "RuntimeLeaseStatus")
+    RuntimeLeaseStatus = models.RuntimeLeaseStatus
+
+    seed_runtime(store, tmp_path)
+    taskrun = seed_taskrun(store)
+    claim = store.claim_taskrun_for_runtime_machine("rt-lease")
+    assert claim is not None
+    store.start_taskrun(taskrun.id)
+
+    result = store.cancel_issue(taskrun.issue_id)
+    cancelled = store.get_taskrun(taskrun.id)
+    lease = store.get_runtime_lease(claim.lease.id)
+    issue = store.get_issue(taskrun.issue_id)
+
+    assert result["cancelled_taskrun_ids"] == [taskrun.id]
+    assert cancelled.status == TaskStatus.CANCELLED
+    assert lease is not None
+    assert lease.status == RuntimeLeaseStatus.RELEASED
+    assert issue.status == IssueStatus.CANCELLED
+
+
+def test_cancel_queued_issue_taskrun(store: Store):
+    agent = store.create_agent("Runner", "", ["dry-run"], [])
+    issue = store.create_issue("Queued work", "", AssigneeType.AGENT, agent.id)
+    taskrun = store.enqueue_taskrun(issue.id, agent.id)
+
+    result = store.cancel_issue(issue.id)
+
+    assert result["cancelled_taskrun_ids"] == [taskrun.id]
+    assert store.get_taskrun(taskrun.id).status == TaskStatus.CANCELLED
+    assert store.get_issue(issue.id).status == IssueStatus.CANCELLED
 
 
 def test_concurrent_claims_create_only_one_active_runtime_lease(tmp_path):

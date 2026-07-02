@@ -8,6 +8,7 @@ from typing import Any
 
 from ariadne.models import (
     FailureReason,
+    IssueStatus,
     Task,
     TaskRun,
     TaskRunClaim,
@@ -195,14 +196,12 @@ class TaskService:
             self.store.mark_task_cancelled(task_id, now)
             lease = self.store.get_active_runtime_lease_for_taskrun(task_id)
             if lease is not None:
-                self.store.mark_runtime_lease_revoked(
-                    lease.id, now, "taskrun_cancelled"
-                )
+                self.store.mark_runtime_lease_released(lease.id, now)
 
         if lease is not None:
             self.store.append_issue_timeline_event(
                 task.issue_id,
-                "lease_revoked",
+                "lease_released",
                 actor_type="system",
                 taskrun_id=task.id,
                 runtime_lease_id=lease.id,
@@ -220,6 +219,23 @@ class TaskService:
     def cancel_taskrun(self, taskrun_id: str) -> TaskRun:
         task = self.cancel_task(taskrun_id)
         return TaskRun(**task.model_dump())
+
+    def cancel_issue(self, issue_id: str) -> dict:
+        issue = self.store.get_issue(issue_id)
+        if issue is None:
+            raise KeyError(f"issue not found: {issue_id}")
+        cancelled_taskrun_ids = []
+        for taskrun in self.store.list_taskruns_for_issue(issue_id):
+            if taskrun.status in (
+                TaskStatus.QUEUED,
+                TaskStatus.PREPARING,
+                TaskStatus.CLAIMED,
+                TaskStatus.RUNNING,
+            ):
+                cancelled = self.cancel_taskrun(taskrun.id)
+                cancelled_taskrun_ids.append(cancelled.id)
+        issue = self.store.update_issue_status(issue_id, IssueStatus.CANCELLED)
+        return {"issue": issue, "cancelled_taskrun_ids": cancelled_taskrun_ids}
 
     def retry_task(self, task_id: str) -> Task:
         old = self.store.load_task(task_id)

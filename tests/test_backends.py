@@ -7,6 +7,8 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -18,6 +20,7 @@ from ariadne.backends import (
     _ShellBackend,
     _capture_diff,
     available_backends,
+    cancel_active_process_group,
     get_backend,
     register_backend,
     render_command,
@@ -151,6 +154,47 @@ def test_shell_backend_timeout_applies_before_stdout_eof(tmp_path):
     assert result.failure_reason == FailureReason.TIMEOUT
     assert "timed out" in result.stderr
     assert result.duration_seconds < 3
+
+
+def test_shell_backend_active_process_group_can_be_cancelled(tmp_path):
+    """running subprocess is registered so cancellation can kill its process group."""
+
+    class SleepBackend(_ShellBackend):
+        name = "sleep"
+        template_env_var = "ARIADNE_SLEEP_COMMAND_TEMPLATE"
+        default_template = f"{shlex.quote(sys.executable)} -c \"import time; time.sleep(5)\""
+        executable_name = sys.executable
+
+        def is_available(self) -> bool:
+            return True
+
+    result_holder = {}
+
+    def execute_backend() -> None:
+        result_holder["result"] = SleepBackend().execute(
+            _make_context(
+                task_id="task-cancel-process",
+                target_repo_path=str(tmp_path),
+                timeout_seconds=30,
+                confirm_execution=True,
+            )
+        )
+
+    thread = threading.Thread(target=execute_backend)
+    thread.start()
+    cancelled = False
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if cancel_active_process_group("task-cancel-process"):
+            cancelled = True
+            break
+        time.sleep(0.05)
+    thread.join(timeout=3)
+
+    assert cancelled is True
+    assert thread.is_alive() is False
+    assert result_holder["result"].success is False
+    assert result_holder["result"].duration_seconds < 5
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,8 @@ Per docs/plan/tasks/core-003.md "test_daemon.py must cover".
 import shlex
 import sys
 import re
+import threading
+import time
 
 import pytest
 from typer.testing import CliRunner
@@ -41,6 +43,19 @@ class SilentSleepBackend(_ShellBackend):
 def ensure_silent_sleep_backend_registered() -> None:
     if SilentSleepBackend.name not in available_backends():
         register_backend(SilentSleepBackend())
+
+
+class LongSleepBackend(_ShellBackend):
+    name = "long-sleep"
+    template_env_var = "ARIADNE_LONG_SLEEP_COMMAND_TEMPLATE"
+    default_template = (
+        f"{shlex.quote(sys.executable)} -c "
+        "\"import time; time.sleep(5)\""
+    )
+    executable_name = sys.executable
+
+    def is_available(self) -> bool:
+        return True
 
 
 @pytest.fixture
@@ -654,3 +669,37 @@ def test_active_lease_heartbeat_updates_during_long_execution(store, tmp_path):
     assert len(leases) == 1
     assert leases[0].last_heartbeat_at is not None
     assert leases[0].last_heartbeat_at > leases[0].acquired_at
+
+
+def test_cancelled_taskrun_kills_running_backend_process(store, tmp_path):
+    agent = store.create_agent("Sleeper", "", ["dry-run"], [])
+    issue = store.create_issue("Cancel sleep", "", AssigneeType.AGENT, agent.id)
+    taskrun = store.enqueue_taskrun(issue.id, agent.id)
+    daemon = Daemon(
+        store=store,
+        backend_factory=lambda name: LongSleepBackend(),
+        runtime_id="rt-cancel-process",
+        poll_interval=0.01,
+        target_repo_path=str(tmp_path),
+        write_workspace=True,
+        backend_heartbeat_interval=0.05,
+    )
+
+    thread = threading.Thread(target=lambda: daemon.start(max_iterations=1))
+    thread.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        current = store.get_taskrun(taskrun.id)
+        if current and current.status == TaskStatus.RUNNING:
+            break
+        time.sleep(0.02)
+    assert store.get_taskrun(taskrun.id).status == TaskStatus.RUNNING
+
+    store.cancel_issue(issue.id)
+    thread.join(timeout=3)
+
+    assert thread.is_alive() is False
+    assert store.get_taskrun(taskrun.id).status == TaskStatus.CANCELLED
+    leases = store.list_runtime_leases(taskrun.id)
+    assert len(leases) == 1
+    assert leases[0].status.value == "released"

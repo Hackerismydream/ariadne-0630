@@ -1,4 +1,4 @@
-import type { IssueDetail, IssueSummary, RunResult } from "./types";
+import type { CancelIssueResult, IssueDetail, IssueSummary, RunResult } from "./types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -29,6 +29,12 @@ export async function createIssue(input: NewIssueInput): Promise<RunResult> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
+  });
+}
+
+export async function cancelIssue(issueId: string): Promise<CancelIssueResult> {
+  return apiFetch<CancelIssueResult>(`/api/issues/${issueId}/cancel`, {
+    method: "POST",
   });
 }
 

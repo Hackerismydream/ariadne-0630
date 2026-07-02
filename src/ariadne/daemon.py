@@ -16,7 +16,11 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from ariadne.backends import ExecutionBackend, available_backends
+from ariadne.backends import (
+    ExecutionBackend,
+    available_backends,
+    cancel_active_process_group,
+)
 from ariadne.models import (
     ExecutionContext,
     ExecutionResult,
@@ -269,16 +273,23 @@ class Daemon:
         try:
             result = backend.execute(context, on_progress=self._on_progress)
         except TimeoutError:
+            if self._task_cancelled_during_execution(task):
+                return
             self.store.fail_task(task.id, "execution timed out", FailureReason.TIMEOUT)
             self._release_active_lease(task.id)
             self._maybe_retry(task)
             self._trigger_event_loop(task)
             return
         except Exception as e:
+            if self._task_cancelled_during_execution(task):
+                return
             self.store.fail_task(task.id, str(e), FailureReason.AGENT_ERROR)
             self._release_active_lease(task.id)
             self._maybe_retry(task)
             self._trigger_event_loop(task)
+            return
+
+        if self._task_cancelled_during_execution(task):
             return
 
         if result.success:
@@ -314,6 +325,21 @@ class Daemon:
         lease = self.store.get_active_runtime_lease_for_taskrun(task_id)
         if lease is not None:
             self.store.release_runtime_lease(lease.id)
+
+    def _task_cancelled_during_execution(self, task: Task) -> bool:
+        latest = self.store.get_task(task.id)
+        if latest is None or latest.status != TaskStatus.CANCELLED:
+            return False
+        cancel_active_process_group(task.id)
+        if latest.trace_id:
+            self.store.log_activity(
+                latest.trace_id,
+                latest.id,
+                "backend_cancelled",
+                {"reason": "taskrun_cancelled"},
+            )
+        logger.info("task %s was cancelled during backend execution", task.id)
+        return True
 
     def _resume_session_id_for_task(self, task: Task) -> str | None:
         """Find the latest provider session id for a retry or same-trace follow-up."""
@@ -441,6 +467,17 @@ class Daemon:
         logger.info("progress: %s (step %d/%d)", update.summary, update.step, update.total)
         task = self.store.get_task(update.task_id)
         if task is None:
+            return
+
+        if task.status == TaskStatus.CANCELLED:
+            killed = cancel_active_process_group(task.id)
+            if task.trace_id:
+                self.store.log_activity(
+                    task.trace_id,
+                    task.id,
+                    "backend_cancel_requested",
+                    {"killed": killed},
+                )
             return
 
         if update.event_type == "backend_heartbeat":

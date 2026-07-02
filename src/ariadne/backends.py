@@ -29,6 +29,40 @@ from ariadne.models import (
     ProgressUpdate,
 )
 
+_ACTIVE_PROCESS_GROUPS: dict[str, int] = {}
+_ACTIVE_PROCESS_GROUPS_LOCK = threading.Lock()
+
+
+def cancel_active_process_group(task_id: str) -> bool:
+    """Best-effort kill of the active backend subprocess group for a task."""
+    with _ACTIVE_PROCESS_GROUPS_LOCK:
+        pid = _ACTIVE_PROCESS_GROUPS.get(task_id)
+    if pid is None:
+        return False
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except Exception:
+            return False
+    return True
+
+
+def _register_active_process_group(task_id: str, pid: int) -> None:
+    with _ACTIVE_PROCESS_GROUPS_LOCK:
+        _ACTIVE_PROCESS_GROUPS[task_id] = pid
+
+
+def _clear_active_process_group(task_id: str, pid: int) -> None:
+    with _ACTIVE_PROCESS_GROUPS_LOCK:
+        if _ACTIVE_PROCESS_GROUPS.get(task_id) == pid:
+            _ACTIVE_PROCESS_GROUPS.pop(task_id, None)
+
 
 def _stringify_progress_content(value: object) -> str | None:
     if value is None:
@@ -425,6 +459,9 @@ class _ShellBackend:
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     start_new_session=True,
                 )
+                proc_pid = getattr(proc, "pid", None)
+                if isinstance(proc_pid, int):
+                    _register_active_process_group(context.task_id, proc_pid)
                 stdout_lines: list[str] = []
                 stderr_lines: list[str] = []
 
@@ -493,6 +530,8 @@ class _ShellBackend:
                     stdout_thread.join(timeout=1)
                     stderr_thread.join(timeout=1)
                     heartbeat_thread.join(timeout=1)
+                    if isinstance(proc_pid, int):
+                        _clear_active_process_group(context.task_id, proc_pid)
                     stdout = "".join(stdout_lines)
                     stderr = "".join(stderr_lines)
                 except subprocess.TimeoutExpired:
@@ -508,6 +547,8 @@ class _ShellBackend:
                     stdout_thread.join(timeout=1)
                     stderr_thread.join(timeout=1)
                     heartbeat_thread.join(timeout=1)
+                    if isinstance(proc_pid, int):
+                        _clear_active_process_group(context.task_id, proc_pid)
                     duration = time.monotonic() - started
                     return ExecutionResult(
                         backend_name=self.name, success=False, exit_code=-1,

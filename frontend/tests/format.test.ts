@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   asciiProgress,
   eventToTranscriptLine,
+  hasCancellableTaskruns,
   issueStatusDisplay,
   retryTreeLines,
   taskrunDiffExplanation,
@@ -141,6 +142,13 @@ test("explains missing diffs for failed taskruns", () => {
     taskrunDiffExplanation(makeTaskrun({ failure_reason: "agent_error", error: "boom" })),
     "no diff captured because execution failed",
   );
+});
+
+test("detects taskruns that can be cancelled", () => {
+  assert.equal(hasCancellableTaskruns([makeTaskrun({ status: "running" })]), true);
+  assert.equal(hasCancellableTaskruns([makeTaskrun({ status: "queued" })]), true);
+  assert.equal(hasCancellableTaskruns([makeTaskrun({ status: "failed" })]), false);
+  assert.equal(hasCancellableTaskruns([makeTaskrun({ status: "completed" })]), false);
 });
 
 test("uses backend names registered by the Python runtime", () => {

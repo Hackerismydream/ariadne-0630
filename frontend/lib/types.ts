@@ -82,6 +82,11 @@ export type RunResult = {
   }>;
 };
 
+export type CancelIssueResult = {
+  issue: IssueSummary;
+  cancelled_taskrun_ids: string[];
+};
+
 export type ActivityStreamEvent = {
   type: "activity";
   id: string;

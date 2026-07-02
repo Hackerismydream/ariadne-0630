@@ -408,6 +408,23 @@ def patch_issue(issue_id: str, req: IssuePatchRequest):
     return payload
 
 
+@app.post("/api/issues/{issue_id}/cancel")
+def cancel_issue(issue_id: str):
+    """Cancel queued/running taskruns for one issue."""
+    store = _get_store()
+    try:
+        result = store.cancel_issue(issue_id)
+    except KeyError as exc:
+        store.close()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    payload = {
+        "issue": _issue_payload(store, result["issue"]),
+        "cancelled_taskrun_ids": result["cancelled_taskrun_ids"],
+    }
+    store.close()
+    return payload
+
+
 @app.get("/api/issues/{issue_id}/taskruns")
 def issue_taskruns(issue_id: str):
     """Return execution records for one issue."""

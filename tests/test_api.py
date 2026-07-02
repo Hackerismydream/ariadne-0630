@@ -346,6 +346,20 @@ def test_patch_issue_status_failed(client):
     assert res.json()["status"] == IssueStatus.FAILED.value
 
 
+def test_cancel_issue_endpoint_cancels_queued_taskrun(client, store):
+    agent = store.create_agent("CancelAgent", "", ["dry-run"], [])
+    issue = store.create_issue("Cancel this", "", AssigneeType.AGENT, agent.id)
+    taskrun = store.enqueue_taskrun(issue.id, agent.id)
+
+    res = client.post(f"/api/issues/{issue.id}/cancel")
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["issue"]["status"] == IssueStatus.CANCELLED.value
+    assert data["cancelled_taskrun_ids"] == [taskrun.id]
+    assert store.get_taskrun(taskrun.id).status.value == "cancelled"
+
+
 def test_issue_taskruns_endpoint_returns_execution_records(client):
     issue_id = client.get("/api/issues").json()[0]["id"]
 

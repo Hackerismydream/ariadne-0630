@@ -134,6 +134,15 @@ export function taskrunDiffExplanation(taskrun: TaskRun): string | null {
   return "no diff captured because execution failed";
 }
 
+export function hasCancellableTaskruns(taskruns: TaskRun[]): boolean {
+  return taskruns.some((taskrun) => (
+    taskrun.status === "queued"
+    || taskrun.status === "preparing"
+    || taskrun.status === "claimed"
+    || taskrun.status === "running"
+  ));
+}
+
 function backendHeartbeatLine(event: ActivityStreamEvent): string {
   const details = event.details ?? {};
   const elapsed = numericDetail(details, "elapsed_seconds");

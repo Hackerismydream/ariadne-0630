@@ -72,6 +72,9 @@ class Store(BenchmarkRepo, IssueRepo, RuntimeRepo, SkillRepo, SquadRepo, TaskRep
     def cancel_taskrun(self, taskrun_id: str) -> TaskRun:
         return self.task_service.cancel_taskrun(taskrun_id)
 
+    def cancel_issue(self, issue_id: str) -> dict:
+        return self.task_service.cancel_issue(issue_id)
+
     def retry_task(self, task_id: str) -> Task:
         return self.task_service.retry_task(task_id)
 

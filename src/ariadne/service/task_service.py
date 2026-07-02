@@ -22,6 +22,12 @@ from ariadne.store.base import (
     MaxAttemptsExhausted,
 )
 
+_TERMINAL_ISSUE_STATUSES = (
+    IssueStatus.DONE,
+    IssueStatus.FAILED,
+    IssueStatus.CANCELLED,
+)
+
 
 class TaskService:
     """Business rules for task claiming and state transitions."""
@@ -182,17 +188,11 @@ class TaskService:
         return TaskRun(**task.model_dump())
 
     def cancel_task(self, task_id: str) -> Task:
-        task = self.store.load_task(task_id)
-        if task.status not in (
-            TaskStatus.QUEUED,
-            TaskStatus.PREPARING,
-            TaskStatus.CLAIMED,
-            TaskStatus.RUNNING,
-        ):
-            raise InvalidStateTransition(task.status.value, "cancel_task")
         now = _now_iso()
         lease = None
         with self.store.transaction():
+            task = self.store.load_task(task_id)
+            self._check_transition(task.status, TaskStatus.CANCELLED, "cancel_task")
             self.store.mark_task_cancelled(task_id, now)
             lease = self.store.get_active_runtime_lease_for_taskrun(task_id)
             if lease is not None:
@@ -224,14 +224,11 @@ class TaskService:
         issue = self.store.get_issue(issue_id)
         if issue is None:
             raise KeyError(f"issue not found: {issue_id}")
+        if issue.status in _TERMINAL_ISSUE_STATUSES:
+            raise InvalidStateTransition(issue.status.value, "cancel_issue")
         cancelled_taskrun_ids = []
         for taskrun in self.store.list_taskruns_for_issue(issue_id):
-            if taskrun.status in (
-                TaskStatus.QUEUED,
-                TaskStatus.PREPARING,
-                TaskStatus.CLAIMED,
-                TaskStatus.RUNNING,
-            ):
+            if (taskrun.status, TaskStatus.CANCELLED) in _LEGAL_TRANSITIONS:
                 cancelled = self.cancel_taskrun(taskrun.id)
                 cancelled_taskrun_ids.append(cancelled.id)
         issue = self.store.update_issue_status(issue_id, IssueStatus.CANCELLED)

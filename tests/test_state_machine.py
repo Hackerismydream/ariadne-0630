@@ -6,6 +6,8 @@ Per docs/architecture/task-state-machine.md "Tests Required".
 
 import sqlite3
 import threading
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +17,7 @@ from ariadne.store import (
     MaxAttemptsExhausted,
     Store,
 )
+from ariadne.store.base import _LEGAL_TRANSITIONS
 
 
 @pytest.fixture
@@ -63,6 +66,178 @@ def test_legal_transitions_failed(store, queued_task):
     assert failed.error == "codex crashed"
     assert failed.failure_reason == FailureReason.AGENT_ERROR
     assert failed.completed_at is not None
+
+
+def test_cancel_queued_is_legal(store, queued_task):
+    """queued → cancelled is a first-class legal transition."""
+    assert (TaskStatus.QUEUED, TaskStatus.CANCELLED) in _LEGAL_TRANSITIONS
+
+    cancelled = store.cancel_task(queued_task.id)
+
+    assert cancelled.status == TaskStatus.CANCELLED
+    assert cancelled.completed_at is not None
+
+
+def test_cancel_claimed_is_legal(store, queued_task):
+    """claimed → cancelled is a first-class legal transition."""
+    claimed = store.claim_task(queued_task.agent_id, "rt-1")
+    assert claimed is not None
+    assert (TaskStatus.CLAIMED, TaskStatus.CANCELLED) in _LEGAL_TRANSITIONS
+
+    cancelled = store.cancel_task(claimed.id)
+
+    assert cancelled.status == TaskStatus.CANCELLED
+    assert cancelled.completed_at is not None
+
+
+def test_cancel_running_is_legal(store, queued_task):
+    """running → cancelled remains legal after adding queued/claimed cancel."""
+    claimed = store.claim_task(queued_task.agent_id, "rt-1")
+    assert claimed is not None
+    running = store.start_task(claimed.id)
+    assert running.status == TaskStatus.RUNNING
+
+    cancelled = store.cancel_task(claimed.id)
+
+    assert cancelled.status == TaskStatus.CANCELLED
+    assert cancelled.completed_at is not None
+
+
+@pytest.mark.parametrize("terminal_status", [
+    TaskStatus.COMPLETED,
+    TaskStatus.FAILED,
+    TaskStatus.CANCELLED,
+])
+def test_cancel_from_terminal_is_rejected(store, queued_task, terminal_status):
+    """Terminal task states cannot be overwritten by cancel."""
+    if terminal_status == TaskStatus.COMPLETED:
+        claimed = store.claim_task(queued_task.agent_id, "rt-1")
+        assert claimed is not None
+        store.start_task(claimed.id)
+        task = store.complete_task(claimed.id, {"ok": True})
+    elif terminal_status == TaskStatus.FAILED:
+        claimed = store.claim_task(queued_task.agent_id, "rt-1")
+        assert claimed is not None
+        store.start_task(claimed.id)
+        task = store.fail_task(
+            claimed.id,
+            "boom",
+            FailureReason.AGENT_ERROR,
+        )
+    else:
+        task = store.cancel_task(queued_task.id)
+
+    with pytest.raises(InvalidStateTransition):
+        store.cancel_task(task.id)
+
+    assert store.get_task(task.id).status == terminal_status
+
+
+def test_cancel_goes_through_state_machine_check(
+    store,
+    queued_task,
+    monkeypatch,
+):
+    """cancel must honor the same transition table as other state changes."""
+    def reject_transition(
+        current: TaskStatus,
+        _target: TaskStatus,
+        action: str,
+    ) -> None:
+        raise InvalidStateTransition(current.value, action)
+
+    monkeypatch.setattr(store.task_service, "_check_transition", reject_transition)
+
+    with pytest.raises(InvalidStateTransition):
+        store.cancel_task(queued_task.id)
+
+    assert store.get_task(queued_task.id).status == TaskStatus.QUEUED
+
+
+def test_cancel_transition_check_happens_inside_write_transaction(
+    store,
+    queued_task,
+    monkeypatch,
+):
+    """cancel validates source status under the same lock as the write."""
+    original_transaction = store.transaction
+    inside_transaction = False
+    checked_inside_transaction = False
+
+    @contextmanager
+    def observing_transaction():
+        nonlocal inside_transaction
+        with original_transaction():
+            inside_transaction = True
+            try:
+                yield
+            finally:
+                inside_transaction = False
+
+    def assert_inside_transaction(
+        _current: TaskStatus,
+        _target: TaskStatus,
+        _action: str,
+    ) -> None:
+        nonlocal checked_inside_transaction
+        assert inside_transaction
+        checked_inside_transaction = True
+
+    monkeypatch.setattr(store, "transaction", observing_transaction)
+    monkeypatch.setattr(
+        store.task_service,
+        "_check_transition",
+        assert_inside_transaction,
+    )
+
+    cancelled = store.cancel_task(queued_task.id)
+
+    assert checked_inside_transaction is True
+    assert cancelled.status == TaskStatus.CANCELLED
+
+
+@pytest.mark.parametrize("terminal_status", [
+    IssueStatus.DONE,
+    IssueStatus.FAILED,
+    IssueStatus.CANCELLED,
+])
+def test_cancel_issue_from_terminal_is_rejected(store, terminal_status):
+    """cancel_issue cannot overwrite an already terminal issue state."""
+    issue = store.create_issue("terminal issue", "", AssigneeType.AGENT, "agent-1")
+    store.update_issue_status(issue.id, terminal_status)
+
+    with pytest.raises(InvalidStateTransition):
+        store.cancel_issue(issue.id)
+
+    assert store.get_issue(issue.id).status == terminal_status
+
+
+def test_documented_legal_transitions_match_code():
+    """The architecture table is the same state machine the service enforces."""
+    docs_path = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "architecture"
+        / "task-state-machine.md"
+    )
+    documented: set[tuple[TaskStatus, TaskStatus]] = set()
+    in_legal_table = False
+
+    for line in docs_path.read_text().splitlines():
+        if line == "## Legal Transitions":
+            in_legal_table = True
+            continue
+        if in_legal_table and line.startswith("## "):
+            break
+        if not in_legal_table or not line.startswith("|"):
+            continue
+
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 2 or cells[0] in {"From", "------"}:
+            continue
+        documented.add((TaskStatus(cells[0]), TaskStatus(cells[1])))
+
+    assert documented == _LEGAL_TRANSITIONS
 
 
 # ---------------------------------------------------------------------------

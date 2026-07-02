@@ -47,15 +47,22 @@ classification, retry chain via `parent_task_id`.
 |------|----|---------|-------|
 | queued | claimed | `claim_task(runtime_id)` | daemon |
 | queued | preparing | `claim_taskrun_for_runtime_machine(runtime_id)` | runtime daemon |
+| queued | cancelled | `cancel_task(task_id)` | user/API |
 | preparing | running | `start_taskrun(taskrun_id)` | runtime daemon |
+| preparing | failed | `fail_task(task_id, error, reason)` | runtime daemon |
+| preparing | cancelled | `cancel_task(task_id)` | user/API |
 | claimed | running | `start_task(task_id)` | daemon |
 | claimed | queued | claim timeout / daemon restart | daemon recovery |
+| claimed | cancelled | `cancel_task(task_id)` | user/API |
 | running | completed | `complete_task(task_id, result)` | daemon |
 | running | failed | `fail_task(task_id, error, reason)` | daemon |
 | running | cancelled | `cancel_task(task_id)` | user/API |
-| failed | queued | `retry_task(task_id)` → creates new task | daemon auto-retry |
 
 **Illegal transitions are rejected with `InvalidStateTransition` error. No silent recovery.**
+Terminal task states (`completed`, `failed`, `cancelled`) cannot be cancelled.
+
+Retry does not mutate a failed task back to `queued`. `retry_task(task_id)`
+creates a new queued task with `parent_task_id` set to the failed task.
 
 ## Failure Classification
 
@@ -133,7 +140,8 @@ Issue status transitions are decoupled from task status. An issue goes
 `todo → in_progress` when its first task is claimed, `in_progress → done`
 when a task completes successfully, and `in_progress → failed` when terminal
 member taskruns fail without successful work. Manual status changes are always
-allowed.
+allowed. Service-level issue cancellation refuses terminal issues (`done`,
+`failed`, `cancelled`) instead of rewriting them.
 
 ## SQLite Schema
 

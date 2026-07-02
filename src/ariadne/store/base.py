@@ -58,11 +58,13 @@ class MaxAttemptsExhausted(Exception):
 _LEGAL_TRANSITIONS: set[tuple[TaskStatus, TaskStatus]] = {
     (TaskStatus.QUEUED, TaskStatus.CLAIMED),
     (TaskStatus.QUEUED, TaskStatus.PREPARING),
+    (TaskStatus.QUEUED, TaskStatus.CANCELLED),
     (TaskStatus.PREPARING, TaskStatus.RUNNING),
     (TaskStatus.PREPARING, TaskStatus.FAILED),
     (TaskStatus.PREPARING, TaskStatus.CANCELLED),
     (TaskStatus.CLAIMED, TaskStatus.RUNNING),
     (TaskStatus.CLAIMED, TaskStatus.QUEUED),
+    (TaskStatus.CLAIMED, TaskStatus.CANCELLED),
     (TaskStatus.RUNNING, TaskStatus.COMPLETED),
     (TaskStatus.RUNNING, TaskStatus.FAILED),
     (TaskStatus.RUNNING, TaskStatus.CANCELLED),

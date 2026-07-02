@@ -17,6 +17,7 @@ const ISSUE_STATUS: Record<IssueStatus, StatusDisplay> = {
   todo: { label: "[TODO]", tone: "secondary", cursor: "" },
   in_progress: { label: "[IN-PROG]", tone: "primary", cursor: "_" },
   done: { label: "[DONE]", tone: "primary", cursor: "" },
+  failed: { label: "[ERR]", tone: "error", cursor: "" },
   cancelled: { label: "[CANCEL]", tone: "muted", cursor: "" },
 };
 

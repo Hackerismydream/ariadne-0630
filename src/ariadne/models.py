@@ -40,6 +40,7 @@ class IssueStatus(str, Enum):
     TODO = "todo"
     IN_PROGRESS = "in_progress"
     DONE = "done"
+    FAILED = "failed"
     CANCELLED = "cancelled"
 
 

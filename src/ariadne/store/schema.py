@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS issue (
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'backlog'
-        CHECK (status IN ('backlog', 'todo', 'in_progress', 'done', 'cancelled')),
+        CHECK (status IN ('backlog', 'todo', 'in_progress', 'done', 'failed', 'cancelled')),
     assignee_type TEXT NOT NULL CHECK (assignee_type IN ('agent', 'squad')),
     assignee_id TEXT NOT NULL,
     created_at TEXT NOT NULL

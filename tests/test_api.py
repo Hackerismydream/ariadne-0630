@@ -170,6 +170,18 @@ def test_patch_issue_status_and_assignee(client, store):
     assert data["assignee_id"] == assignee.id
 
 
+def test_patch_issue_status_failed(client):
+    issue_id = client.get("/api/issues").json()[0]["id"]
+
+    res = client.patch(
+        f"/api/issues/{issue_id}",
+        json={"status": "failed"},
+    )
+
+    assert res.status_code == 200
+    assert res.json()["status"] == IssueStatus.FAILED.value
+
+
 def test_issue_taskruns_endpoint_returns_execution_records(client):
     issue_id = client.get("/api/issues").json()[0]["id"]
 

@@ -186,6 +186,9 @@ class Orchestrator:
                 issue,
                 decision.reason or "leader coordination failed",
                 delegation_payload=decision.delegation_payload,
+                mark_issue_failed=self._all_completed_results_failed(
+                    completed_results
+                ),
             )
             return
 
@@ -233,8 +236,12 @@ class Orchestrator:
             issue = self.store.get_issue(task.issue_id)
             if issue is None:
                 return
-            if issue.status == IssueStatus.DONE:
-                # Issue already done — no need to re-activate leader
+            if issue.status in (
+                IssueStatus.DONE,
+                IssueStatus.FAILED,
+                IssueStatus.CANCELLED,
+            ):
+                # Issue already terminal — no need to re-activate leader
                 return
 
             leader_task = self.store.enqueue_taskrun(
@@ -279,9 +286,12 @@ class Orchestrator:
         """Gather results of completed/failed member tasks for leader re-evaluation."""
         rows = self.store._conn.execute(
             """SELECT t.id, t.agent_id, t.status, t.result, t.error, a.name as agent_name
-               FROM task t LEFT JOIN agent a ON t.agent_id = a.id
+               FROM task t
+               JOIN squad s ON s.id = t.squad_id
+               LEFT JOIN agent a ON t.agent_id = a.id
                WHERE t.squad_id = ? AND t.issue_id = ?
                  AND t.status IN ('completed', 'failed')
+                 AND t.agent_id != s.leader_id
                ORDER BY t.created_at""",
             (squad_id, issue_id),
         ).fetchall()
@@ -312,16 +322,27 @@ class Orchestrator:
                 delegation_payload=raw_decision.model_dump(),
             )
         if raw_decision is None:
-            reason = (
-                "completed member work satisfied the issue"
-                if completed_results
-                else "legacy decider returned no delegation"
-            )
+            if any(r["status"] == "completed" for r in completed_results):
+                return LeaderDecision(
+                    outcome=LeaderDecisionOutcome.DONE,
+                    reason="completed member work satisfied the issue",
+                )
+            if self._all_completed_results_failed(completed_results):
+                return LeaderDecision(
+                    outcome=LeaderDecisionOutcome.FAILED,
+                    reason="all completed member taskruns failed",
+                )
+            reason = "legacy decider returned no delegation"
             return LeaderDecision(outcome=LeaderDecisionOutcome.DONE, reason=reason)
         return LeaderDecision(
             outcome=LeaderDecisionOutcome.FAILED,
             reason=f"unsupported leader decision output: {type(raw_decision).__name__}",
             delegation_payload={"raw": repr(raw_decision)},
+        )
+
+    def _all_completed_results_failed(self, completed_results: list[dict]) -> bool:
+        return bool(completed_results) and all(
+            result["status"] == "failed" for result in completed_results
         )
 
     def _delegation_from_leader_decision(
@@ -341,6 +362,7 @@ class Orchestrator:
         issue: Issue,
         reason: str,
         delegation_payload: dict | None = None,
+        mark_issue_failed: bool = False,
     ) -> None:
         if task.squad_id is None:
             return
@@ -353,6 +375,8 @@ class Orchestrator:
             delegation_payload=delegation_payload or {},
             created_taskrun_ids=[],
         )
+        if mark_issue_failed:
+            self.store.update_issue_status(issue.id, IssueStatus.FAILED)
         self._ensure_leader_started(task.id)
         self.store.fail_task(
             task.id,

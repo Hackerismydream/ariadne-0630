@@ -7,6 +7,7 @@ from ariadne.daemon import Daemon
 from ariadne.models import (
     AssigneeType,
     DelegationDecision,
+    FailureReason,
     IssueStatus,
     LeaderDecision,
     LeaderDecisionOutcome,
@@ -32,6 +33,63 @@ def squad_setup(store):
     issue = store.create_issue("Build feature", "Do the thing", AssigneeType.SQUAD, squad.id)
     leader_task = store.enqueue_task(issue.id, leader.id, squad_id=squad.id)
     return squad, leader, member, issue, leader_task
+
+
+def fail_member_attempt(store, issue, squad, member, error):
+    task = store.enqueue_task(issue.id, member.id, squad_id=squad.id)
+    claimed = store.claim_task(member.id, f"rt-{task.id}")
+    assert claimed is not None
+    assert claimed.id == task.id
+    store.start_task(claimed.id)
+    return store.fail_task(claimed.id, error, FailureReason.TIMEOUT)
+
+
+def complete_member_attempt(store, issue, squad, member, result):
+    task = store.enqueue_task(issue.id, member.id, squad_id=squad.id)
+    claimed = store.claim_task(member.id, f"rt-{task.id}")
+    assert claimed is not None
+    assert claimed.id == task.id
+    store.start_task(claimed.id)
+    return store.complete_task(claimed.id, result)
+
+
+def complete_leader_action_then_fail_member_attempts(store, squad, leader, member, issue, leader_task):
+    decision = DelegationDecision(
+        target_agent_id=member.id,
+        backend="dry-run",
+        handoff_prompt="Implement it.",
+        reason="delegate implementation",
+        skill_refs=[],
+    )
+    store.claim_task(leader.id, "rt-leader-action")
+    Orchestrator(store=store, llm_decide=lambda b, i, cr=None: decision).handle_leader_task(
+        leader_task
+    )
+
+    action = store.list_leader_decisions(issue.id)[0]
+    first_member_task_id = action.created_taskrun_ids[0]
+    claimed = store.claim_task(member.id, "rt-member-1")
+    assert claimed is not None
+    assert claimed.id == first_member_task_id
+    store.start_task(claimed.id)
+    failed = store.fail_task(claimed.id, "attempt 1 timed out", FailureReason.TIMEOUT)
+
+    retry = store.retry_taskrun(failed.id)
+    claimed_retry = store.claim_task(member.id, "rt-member-2")
+    assert claimed_retry is not None
+    assert claimed_retry.id == retry.id
+    store.start_task(claimed_retry.id)
+    failed_retry = store.fail_task(
+        claimed_retry.id,
+        "attempt 2 timed out",
+        FailureReason.TIMEOUT,
+    )
+
+    orc = Orchestrator(store=store, llm_decide=lambda b, i, cr=None: None)
+    orc.on_member_task_complete(failed_retry)
+    leader_reeval = store.claim_task(leader.id, "rt-leader-reeval")
+    assert leader_reeval is not None
+    return leader_reeval
 
 
 def test_action_records_leader_decision_and_child_taskrun(store, squad_setup):
@@ -125,6 +183,93 @@ def test_done_records_decision_then_closes_issue(store, squad_setup):
     assert record.delegation_payload["issue_timeline_event_count"] >= 1
     event_types = [event.event_type for event in store.get_issue_timeline(issue.id)]
     assert event_types.index("leader_decided") < event_types.index("issue_closed")
+
+
+def test_squad_failed_member_attempts_do_not_close_issue_done(store, squad_setup):
+    squad, leader, member, issue, leader_task = squad_setup
+    fail_member_attempt(store, issue, squad, member, "attempt 1 timed out")
+    fail_member_attempt(store, issue, squad, member, "attempt 2 timed out")
+    store.claim_task(leader.id, "rt-leader")
+
+    orc = Orchestrator(store=store, llm_decide=lambda b, i, cr=None: None)
+    orc.handle_leader_task(leader_task)
+
+    assert store.get_issue(issue.id).status != IssueStatus.DONE
+
+
+def test_squad_failed_member_attempts_mark_issue_failed(store, squad_setup):
+    squad, leader, member, issue, leader_task = squad_setup
+    fail_member_attempt(store, issue, squad, member, "attempt 1 timed out")
+    fail_member_attempt(store, issue, squad, member, "attempt 2 timed out")
+    store.claim_task(leader.id, "rt-leader")
+
+    orc = Orchestrator(store=store, llm_decide=lambda b, i, cr=None: None)
+    orc.handle_leader_task(leader_task)
+
+    assert store.get_issue(issue.id).status == IssueStatus.FAILED
+    assert store.get_task(leader_task.id).status == TaskStatus.FAILED
+    record = store.list_leader_decisions(issue.id)[0]
+    assert record.outcome == LeaderDecisionOutcome.FAILED
+    assert record.reason == "all completed member taskruns failed"
+
+
+def test_completed_leader_action_does_not_make_failed_members_done(store, squad_setup):
+    squad, leader, member, issue, leader_task = squad_setup
+    leader_reeval = complete_leader_action_then_fail_member_attempts(
+        store,
+        squad,
+        leader,
+        member,
+        issue,
+        leader_task,
+    )
+
+    Orchestrator(store=store, llm_decide=lambda b, i, cr=None: None).handle_leader_task(
+        leader_reeval
+    )
+
+    assert store.get_issue(issue.id).status == IssueStatus.FAILED
+    assert [
+        decision.outcome for decision in store.list_leader_decisions(issue.id)
+    ] == [LeaderDecisionOutcome.ACTION, LeaderDecisionOutcome.FAILED]
+
+
+def test_explicit_failed_decision_after_failed_members_marks_issue_failed(
+    store,
+    squad_setup,
+):
+    squad, leader, member, issue, leader_task = squad_setup
+    leader_reeval = complete_leader_action_then_fail_member_attempts(
+        store,
+        squad,
+        leader,
+        member,
+        issue,
+        leader_task,
+    )
+
+    failed = LeaderDecision(
+        outcome=LeaderDecisionOutcome.FAILED,
+        reason="All member attempts timed out.",
+    )
+    Orchestrator(store=store, llm_decide=lambda b, i, cr=None: failed).handle_leader_task(
+        leader_reeval
+    )
+
+    assert store.get_issue(issue.id).status == IssueStatus.FAILED
+
+
+def test_squad_one_completed_member_still_allows_done(store, squad_setup):
+    squad, leader, member, issue, leader_task = squad_setup
+    fail_member_attempt(store, issue, squad, member, "first attempt timed out")
+    complete_member_attempt(store, issue, squad, member, {"output": "done"})
+    store.claim_task(leader.id, "rt-leader")
+
+    orc = Orchestrator(store=store, llm_decide=lambda b, i, cr=None: None)
+    orc.handle_leader_task(leader_task)
+
+    assert store.get_issue(issue.id).status == IssueStatus.DONE
+    assert store.get_task(leader_task.id).status == TaskStatus.COMPLETED
 
 
 def test_member_completion_loop_records_action_then_done(store, squad_setup):

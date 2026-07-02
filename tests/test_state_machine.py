@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from ariadne.models import AssigneeType, FailureReason, TaskStatus
+from ariadne.models import AssigneeType, FailureReason, IssueStatus, TaskStatus
 from ariadne.store import (
     InvalidStateTransition,
     MaxAttemptsExhausted,
@@ -237,6 +237,43 @@ def test_task_migration_resolves_duplicate_active_tasks_per_issue(tmp_path, capl
     assert failed["failure_reason"] == "runtime_recovery"
     assert index_row is not None
     assert "duplicate active tasks for one issue" in caplog.text
+
+
+def test_issue_status_migration_allows_failed_status(tmp_path):
+    db_path = tmp_path / "legacy-issue.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE issue (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'backlog'
+                CHECK (status IN ('backlog', 'todo', 'in_progress', 'done', 'cancelled')),
+            assignee_type TEXT NOT NULL CHECK (assignee_type IN ('agent', 'squad')),
+            assignee_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO issue
+            (id, title, description, status, assignee_type, assignee_id, created_at)
+            VALUES ('issue-1', 'legacy', '', 'todo', 'agent', 'agent-1',
+                    '2026-01-01T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = Store(str(db_path))
+    try:
+        updated = migrated.update_issue_status("issue-1", IssueStatus.FAILED)
+        table_sql = migrated._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'issue'"
+        ).fetchone()["sql"]
+    finally:
+        migrated.close()
+
+    assert updated.status == IssueStatus.FAILED
+    assert "'failed'" in table_sql
 
 
 # ---------------------------------------------------------------------------

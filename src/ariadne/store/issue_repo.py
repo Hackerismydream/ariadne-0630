@@ -15,6 +15,13 @@ from ariadne.models import (
 from .base import _new_id, _now_iso
 
 
+_TERMINAL_ISSUE_STATUSES = (
+    IssueStatus.DONE,
+    IssueStatus.FAILED,
+    IssueStatus.CANCELLED,
+)
+
+
 class IssueRepo:
 
     # ------------------------------------------------------------------
@@ -127,7 +134,7 @@ class IssueRepo:
         issue = self.get_issue(issue_id)
         if issue is None:
             raise KeyError(f"issue not found: {issue_id}")
-        if status in (IssueStatus.DONE, IssueStatus.CANCELLED):
+        if status in _TERMINAL_ISSUE_STATUSES:
             self.append_issue_timeline_event(
                 issue_id,
                 "issue_closed",
@@ -167,7 +174,7 @@ class IssueRepo:
                 "issue_status_changed",
                 payload={"status": next_status.value},
             )
-            if next_status in (IssueStatus.DONE, IssueStatus.CANCELLED):
+            if next_status in _TERMINAL_ISSUE_STATUSES:
                 self.append_issue_timeline_event(
                     issue_id,
                     "issue_closed",

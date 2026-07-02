@@ -116,6 +116,7 @@ class IssueStatus(str, Enum):
     TODO = "todo"
     IN_PROGRESS = "in_progress"
     DONE = "done"
+    FAILED = "failed"
     CANCELLED = "cancelled"
 
 class Issue(BaseModel):
@@ -130,7 +131,9 @@ class Issue(BaseModel):
 
 Issue status transitions are decoupled from task status. An issue goes
 `todo → in_progress` when its first task is claimed, `in_progress → done`
-when a task completes successfully. Manual status changes are always allowed.
+when a task completes successfully, and `in_progress → failed` when terminal
+member taskruns fail without successful work. Manual status changes are always
+allowed.
 
 ## SQLite Schema
 
@@ -140,7 +143,7 @@ CREATE TABLE issue (
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'backlog'
-        CHECK (status IN ('backlog', 'todo', 'in_progress', 'done', 'cancelled')),
+        CHECK (status IN ('backlog', 'todo', 'in_progress', 'done', 'failed', 'cancelled')),
     assignee_type TEXT NOT NULL CHECK (assignee_type IN ('agent', 'squad')),
     assignee_id TEXT NOT NULL,
     created_at TEXT NOT NULL

@@ -25,6 +25,11 @@ test("maps backend task and issue statuses to terminal status codes", () => {
     tone: "primary",
     cursor: "_",
   });
+  assert.deepEqual(issueStatusDisplay("failed"), {
+    label: "[ERR]",
+    tone: "error",
+    cursor: "",
+  });
 });
 
 test("renders deterministic ASCII progress bars", () => {

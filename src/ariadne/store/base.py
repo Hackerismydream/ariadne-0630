@@ -128,6 +128,7 @@ class StoreBase:
         self._conn.commit()
         self._lock = threading.Lock()
 
+        self._migrate_issue_table_if_needed()
         self._migrate_task_table_if_needed()
         cols = [r[1] for r in self._conn.execute("PRAGMA table_info(task)").fetchall()]
         if "handoff_prompt" not in cols:
@@ -173,6 +174,40 @@ class StoreBase:
 
     def _row_to_taskrun(self, row: sqlite3.Row) -> TaskRun:
         return self.row_to(TaskRun, row)
+
+    def _migrate_issue_table_if_needed(self) -> None:
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'issue'"
+        ).fetchone()
+        if row is None:
+            return
+        table_sql = row["sql"] or ""
+        if "'failed'" in table_sql:
+            return
+
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        self._conn.execute(
+            """CREATE TABLE issue_new (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'backlog'
+                    CHECK (status IN ('backlog', 'todo', 'in_progress', 'done', 'failed', 'cancelled')),
+                assignee_type TEXT NOT NULL CHECK (assignee_type IN ('agent', 'squad')),
+                assignee_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        self._conn.execute(
+            """INSERT INTO issue_new
+               (id, title, description, status, assignee_type, assignee_id, created_at)
+               SELECT id, title, description, status, assignee_type, assignee_id, created_at
+               FROM issue"""
+        )
+        self._conn.execute("DROP TABLE issue")
+        self._conn.execute("ALTER TABLE issue_new RENAME TO issue")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.commit()
 
     def _migrate_task_table_if_needed(self) -> None:
         row = self._conn.execute(

@@ -3,6 +3,7 @@ export type IssueStatus =
   | "todo"
   | "in_progress"
   | "done"
+  | "failed"
   | "cancelled";
 
 export type TaskStatus =

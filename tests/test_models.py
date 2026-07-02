@@ -65,7 +65,20 @@ def test_issue_status_values():
     assert IssueStatus.TODO.value == "todo"
     assert IssueStatus.IN_PROGRESS.value == "in_progress"
     assert IssueStatus.DONE.value == "done"
+    assert IssueStatus.FAILED.value == "failed"
     assert IssueStatus.CANCELLED.value == "cancelled"
+
+
+def test_issue_status_has_exactly_six_members():
+    assert len(list(IssueStatus)) == 6
+    assert {m.value for m in IssueStatus} == {
+        "backlog",
+        "todo",
+        "in_progress",
+        "done",
+        "failed",
+        "cancelled",
+    }
 
 
 def test_failure_reason_values():

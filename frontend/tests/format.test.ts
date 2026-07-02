@@ -5,9 +5,12 @@ import {
   asciiProgress,
   eventToTranscriptLine,
   issueStatusDisplay,
+  retryTreeLines,
+  taskrunDiffExplanation,
   taskStatusDisplay,
 } from "../lib/format";
 import { BACKEND_OPTIONS } from "../lib/api";
+import type { TaskRun } from "../lib/types";
 
 test("maps backend task and issue statuses to terminal status codes", () => {
   assert.deepEqual(taskStatusDisplay("running"), {
@@ -89,9 +92,82 @@ test("turns structured SSE events into transcript lines", () => {
     }),
     /\.\.\.$/,
   );
+  assert.equal(
+    eventToTranscriptLine({
+      type: "activity",
+      id: "act-2",
+      created_at: "2026-07-02T00:00:04Z",
+      task_id: "taskrun-1",
+      event: "backend_heartbeat",
+      details: {
+        backend: "codex",
+        elapsed_seconds: 185,
+        timeout_seconds: 300,
+      },
+      message_type: null,
+      tool_name: null,
+      content: null,
+    }),
+    "> CODEX HEARTBEAT elapsed 185s / 300s [||||||||||||........] 62%",
+  );
+});
+
+test("renders retry chains with failure reasons", () => {
+  const first = makeTaskrun({
+    id: "taskrun-a",
+    attempt: 1,
+    parent_taskrun_id: null,
+    created_at: "2026-07-02T00:00:00Z",
+  });
+  const retry = makeTaskrun({
+    id: "taskrun-b",
+    attempt: 2,
+    parent_taskrun_id: "taskrun-a",
+    created_at: "2026-07-02T00:00:01Z",
+  });
+
+  assert.deepEqual(retryTreeLines([retry, first]), [
+    "taskrun-a attempt 1/2 [ERR] elapsed=300s failure_reason=timeout",
+    "└─ taskrun-b attempt 2/2 [ERR] elapsed=300s failure_reason=timeout",
+  ]);
+});
+
+test("explains missing diffs for failed taskruns", () => {
+  assert.equal(
+    taskrunDiffExplanation(makeTaskrun({ error: "execution timed out after 300s" })),
+    "provider timed out after 300s",
+  );
+  assert.equal(
+    taskrunDiffExplanation(makeTaskrun({ failure_reason: "agent_error", error: "boom" })),
+    "no diff captured because execution failed",
+  );
 });
 
 test("uses backend names registered by the Python runtime", () => {
   assert.deepEqual(BACKEND_OPTIONS, ["dry-run", "codex", "claude-code"]);
   assert.equal(BACKEND_OPTIONS.includes("claude" as never), false);
 });
+
+function makeTaskrun(overrides: Partial<TaskRun> = {}): TaskRun {
+  return {
+    id: "taskrun-a",
+    issue_id: "issue-1",
+    agent_profile_id: "agent-1",
+    squad_id: null,
+    status: "failed",
+    attempt: 1,
+    max_attempts: 2,
+    parent_taskrun_id: null,
+    failure_reason: "timeout",
+    trace_id: "trace-1",
+    duration_seconds: 300,
+    diff: null,
+    changed_files: [],
+    result: {},
+    error: "execution timed out after 300s",
+    created_at: "2026-07-02T00:00:00Z",
+    started_at: "2026-07-02T00:00:00Z",
+    completed_at: "2026-07-02T00:05:00Z",
+    ...overrides,
+  };
+}

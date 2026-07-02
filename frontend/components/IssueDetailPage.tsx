@@ -4,9 +4,11 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { eventsUrl, getIssue } from "../lib/api";
+import { retryTreeLines, taskrunDiffExplanation } from "../lib/format";
 import type {
   ActivityStreamEvent,
   IssueDetail,
+  TaskRun,
   IssueTimelineStreamEvent,
 } from "../lib/types";
 import { AsciiLogo } from "./AsciiLogo";
@@ -97,6 +99,13 @@ export function IssueDetailPage({ issueId }: { issueId: string }) {
   const completedTaskruns =
     detail?.taskruns.filter((taskrun) => taskrun.status === "completed").length ?? 0;
   const taskrunTotal = detail?.taskruns.length ?? 0;
+  const retryLines = useMemo(() => (detail ? retryTreeLines(detail.taskruns) : []), [detail]);
+  const diffExplanation = useMemo(() => {
+    if (!detail) {
+      return "(no diff captured)";
+    }
+    return detail.taskruns.map(taskrunDiffExplanation).find(Boolean) ?? "(no diff captured)";
+  }, [detail]);
 
   return (
     <main className="terminal-shell">
@@ -116,6 +125,9 @@ export function IssueDetailPage({ issueId }: { issueId: string }) {
               <div>title    : {detail.title}</div>
               <div>assignee : {detail.assignee_type}:{detail.assignee_id}</div>
               <div>created  : {detail.created_at}</div>
+              {detail.status === "failed" ? (
+                <div className="text-terminal-error">[ERR] issue failed; inspect taskrun chain below</div>
+              ) : null}
               <AsciiProgress done={completedTaskruns} total={Math.max(taskrunTotal, 1)} label="taskruns completed" />
             </div>
           ) : (
@@ -130,12 +142,31 @@ export function IssueDetailPage({ issueId }: { issueId: string }) {
         <Pane title="TASKRUNS">
           <div className="grid gap-2">
             {detail?.taskruns.map((taskrun) => (
-              <div className="grid grid-cols-[13ch_1fr_10ch] gap-[2ch] border-b border-dashed border-terminal-border py-2" key={taskrun.id}>
-                <TaskStatusBadge status={taskrun.status} />
-                <span>{taskrun.id}</span>
-                <span>{taskrun.duration_seconds ?? 0}s</span>
+              <div className="grid gap-1 border-b border-dashed border-terminal-border py-2" key={taskrun.id}>
+                <div className="grid grid-cols-[13ch_1fr] gap-[2ch]">
+                  <TaskStatusBadge status={taskrun.status} />
+                  <span>{taskrun.id}</span>
+                </div>
+                <div className="grid gap-1 pl-[15ch] text-terminal-muted">
+                  <span>attempt={taskrun.attempt}/{taskrun.max_attempts}</span>
+                  <span>parent={taskrun.parent_taskrun_id ?? "root"}</span>
+                  <span>elapsed={taskrunElapsed(taskrun)} last_event={taskrunLastEvent(taskrun)}</span>
+                  {taskrun.failure_reason ? (
+                    <span className="text-terminal-error">failure_reason={taskrun.failure_reason}</span>
+                  ) : null}
+                  {taskrunDiffExplanation(taskrun) ? (
+                    <span className={taskrun.status === "failed" ? "text-terminal-error" : "text-terminal-muted"}>
+                      {taskrunDiffExplanation(taskrun)}
+                    </span>
+                  ) : null}
+                </div>
               </div>
             )) ?? <div className="text-terminal-muted">no taskruns yet</div>}
+            {retryLines.length ? (
+              <pre className="border-l border-terminal-border pl-[2ch] text-terminal-secondary">
+                {retryLines.join("\n")}
+              </pre>
+            ) : null}
           </div>
         </Pane>
 
@@ -148,10 +179,21 @@ export function IssueDetailPage({ issueId }: { issueId: string }) {
             <div className="mb-4 text-terminal-muted">(no changed files captured)</div>
           )}
           <pre className="max-h-[34vh] overflow-auto border-l border-terminal-border pl-[2ch] text-[var(--fs-mono)] text-terminal-primary">
-            {detail?.diff ?? "(no diff captured)"}
+            {detail?.diff ?? diffExplanation}
           </pre>
         </Pane>
       </div>
     </main>
   );
+}
+
+function taskrunElapsed(taskrun: TaskRun): string {
+  if (taskrun.duration_seconds === null) {
+    return "n/a";
+  }
+  return `${Number.isInteger(taskrun.duration_seconds) ? taskrun.duration_seconds : taskrun.duration_seconds.toFixed(2)}s`;
+}
+
+function taskrunLastEvent(taskrun: TaskRun): string {
+  return taskrun.completed_at ?? taskrun.started_at ?? taskrun.created_at;
 }
